@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Worker Dashboard - Monkeys Have Fallen The Tree</title>
+    
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+        import { getAuth, signOut } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
+        import { getFirestore, doc, getDoc, updateDoc, collection, query, where, orderBy, getDocs, onSnapshot, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+        
+        // Firebase configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyAszc76bGqYvAOSqZ5ZuxWDQNqdw8We2uc",
+            authDomain: "monkeys-have-fallen-tree.firebaseapp.com",
+            projectId: "monkeys-have-fallen-tree",
+            storageBucket: "monkeys-have-fallen-tree.firebasestorage.app",
+            messagingSenderId: "585775814693",
+            appId: "1:585775814693:web:fdab2f5af6a0a1e39687cc",
+            measurementId: "G-YTQ38QQFEL"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // Make Firebase functions available globally
+        window.auth = auth;
+        window.signOut = signOut;
+        window.db = db;
+        window.doc = doc;
+        window.getDoc = getDoc;
+        window.updateDoc = updateDoc;
+        window.collection = collection;
+        window.query = query;
+        window.where = where;
+        window.orderBy = orderBy;
+        window.getDocs = getDocs;
+        window.onSnapshot = onSnapshot;
+        window.serverTimestamp = serverTimestamp;
+    </script>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 100%);
+            color: #ffffff;
+            min-height: 100vh;
+        }
+
+        /* Header */
+        .dashboard-header {
+            background: rgba(20, 20, 20, 0.95);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(239, 65, 75, 0.3);
+            padding: 20px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+
+        .dashboard-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #ef414b;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .dashboard-title::before {
+            content: '👷';
+            font-size: 1.2rem;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .logout-btn {
+            background: transparent;
+            color: #cccccc;
+            border: 1px solid #cccccc;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .logout-btn:hover {
+            background: #cccccc;
+            color: #000000;
+            transform: translateY(-1px);
+        }
+
+        .home-btn {
+            background: #ef414b;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .home-btn:hover {
+            background: #d63641;
+            transform: translateY(-1px);
+        }
+
+        .session-info {
+            display: flex;
+            align-items: center;
+            margin-right: 15px;
+        }
+
+        .session-time {
+            color: #cccccc;
+            font-size: 0.9rem;
+            font-weight: 500;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        /* Main content */
+        .dashboard-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 30px;
+        }
+
+        .welcome-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        .welcome-title {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #ef414b;
+            margin-bottom: 10px;
+        }
+
+        .welcome-subtitle {
+            color: #cccccc;
+            font-size: 1.1rem;
+            margin-bottom: 20px;
+        }
+
+        .worker-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 30px;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            border-color: rgba(239, 65, 75, 0.3);
+        }
+
+        .stat-number {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #ef414b;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            color: #cccccc;
+            font-size: 0.9rem;
+        }
+
+        /* Profile Section */
+        .profile-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #ef414b;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-title::before {
+            content: '👤';
+            font-size: 1.2rem;
+        }
+
+        .profile-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+
+        .profile-item {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 15px;
+        }
+
+        .profile-label {
+            color: #888888;
+            font-size: 0.9rem;
+            margin-bottom: 5px;
+        }
+
+        .profile-value {
+            color: #ffffff;
+            font-weight: 600;
+            font-size: 1rem;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .status-pending {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+            border: 1px solid rgba(255, 193, 7, 0.3);
+        }
+
+        .status-approved {
+            background: rgba(40, 167, 69, 0.2);
+            color: #28a745;
+            border: 1px solid rgba(40, 167, 69, 0.3);
+        }
+
+        .status-rejected {
+            background: rgba(220, 53, 69, 0.2);
+            color: #dc3545;
+            border: 1px solid rgba(220, 53, 69, 0.3);
+        }
+
+        /* Tasks Section */
+        .tasks-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        .tasks-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .tasks-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #ef414b;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .tasks-title::before {
+            content: '📋';
+            font-size: 1.2rem;
+        }
+
+        .tasks-list {
+            display: grid;
+            gap: 15px;
+        }
+
+        .task-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 20px;
+            transition: all 0.3s ease;
+        }
+
+        .task-card:hover {
+            border-color: rgba(239, 65, 75, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .task-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .task-title {
+            font-weight: 600;
+            color: #ffffff;
+            font-size: 1.1rem;
+        }
+
+        .task-status {
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .status-assigned {
+            background: rgba(0, 123, 255, 0.2);
+            color: #007bff;
+            border: 1px solid rgba(0, 123, 255, 0.3);
+        }
+
+        .status-in-progress {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+            border: 1px solid rgba(255, 193, 7, 0.3);
+        }
+
+        .status-completed {
+            background: rgba(40, 167, 69, 0.2);
+            color: #28a745;
+            border: 1px solid rgba(40, 167, 69, 0.3);
+        }
+
+        .status-pending-approval {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+            border: 1px solid rgba(255, 193, 7, 0.3);
+        }
+
+        .task-details {
+            color: #cccccc;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            margin-bottom: 15px;
+        }
+
+        .task-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .task-btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+        }
+
+        .btn-start {
+            background: #007bff;
+            color: white;
+        }
+
+        .btn-start:hover {
+            background: #0056b3;
+        }
+
+        .btn-complete {
+            background: #28a745;
+            color: white;
+        }
+
+            .btn-complete:hover {
+            background: #1e7e34;
+        }
+
+        .btn-view {
+            background: transparent;
+            color: #cccccc;
+            border: 1px solid #cccccc;
+        }
+
+        .btn-view:hover {
+            background: #cccccc;
+            color: #000000;
+        }
+
+        .no-tasks {
+            text-align: center;
+            color: #888888;
+            padding: 40px;
+            font-style: italic;
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #cccccc;
+        }
+
+        .spinner {
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-top: 3px solid #ef414b;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .dashboard-header {
+                padding: 15px 20px;
+                flex-direction: column;
+                gap: 15px;
+            }
+
+            .header-actions {
+                width: 100%;
+                justify-content: center;
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+            
+            .session-info {
+                margin-right: 0;
+                order: -1;
+                width: 100%;
+                justify-content: center;
+            }
+            
+            .session-time {
+                font-size: 0.8rem;
+                padding: 6px 10px;
+            }
+
+            .dashboard-container {
+                padding: 20px;
+            }
+
+            .welcome-title {
+                font-size: 1.5rem;
+            }
+
+            .worker-stats {
+                grid-template-columns: 1fr;
+            }
+
+            .profile-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .tasks-header {
+                flex-direction: column;
+                gap: 15px;
+                align-items: stretch;
+            }
+
+            .task-header {
+                flex-direction: column;
+                gap: 10px;
+                align-items: flex-start;
+            }
+
+            .task-actions {
+                justify-content: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <header class="dashboard-header">
+        <div class="dashboard-title">Worker Dashboard</div>
+        <div class="header-actions">
+            <div class="session-info">
+                <span class="session-time" id="headerSessionTime">-</span>
+            </div>
+            <a href="index.html" class="home-btn">
+                🏠 Back to Site
+            </a>
+            <button class="logout-btn" onclick="logout()">
+                🚪 Logout
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="dashboard-container">
+        <!-- Welcome Section -->
+        <section class="welcome-section">
+            <h1 class="welcome-title" id="welcomeTitle">Welcome!</h1>
+            <p class="welcome-subtitle">Manage your tasks and track your progress</p>
+            
+            <div class="worker-stats">
+                <div class="stat-card">
+                    <div class="stat-number" id="totalTasks">-</div>
+                    <div class="stat-label">Total Tasks</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="completedTasks">-</div>
+                    <div class="stat-label">Completed Tasks</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="pendingTasks">-</div>
+                    <div class="stat-label">Pending Tasks</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="completionRate">-</div>
+                    <div class="stat-label">Completion Rate</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="sessionDuration">-</div>
+                    <div class="stat-label">Session Duration</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Profile Section -->
+        <section class="profile-section">
+            <h2 class="section-title">Profile Information</h2>
+            <div class="profile-grid" id="profileGrid">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading profile...</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Tasks Section -->
+        <section class="tasks-section">
+            <div class="tasks-header">
+                <h2 class="tasks-title">Your Tasks</h2>
+            </div>
+            <div class="tasks-list" id="tasksList">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading tasks...</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        let currentWorker = null;
+        let workerTasks = [];
+        let pageFullyLoaded = false;
+
+        // Check authentication
+        function checkAuth() {
+            const isAuthenticated = localStorage.getItem('workerAuthenticated');
+            const workerData = localStorage.getItem('currentWorker');
+            
+            if (isAuthenticated !== 'true' || !workerData) {
+                window.location.href = 'worker-login-firebase.html';
+                return false;
+            }
+
+            currentWorker = JSON.parse(workerData);
+            return true;
+        }
+
+        // Logout function
+        async function logout() {
+            if (confirm('Are you sure you want to logout?')) {
+                try {
+                    // Record logout time before signing out
+                    if (currentWorker && currentWorker.uid) {
+                        await window.updateDoc(window.doc(window.db, "workers", currentWorker.uid), {
+                            lastLogout: window.serverTimestamp(),
+                            isOnline: false
+                        });
+                    }
+                    
+                    await window.signOut(window.auth);
+                    localStorage.removeItem('workerAuthenticated');
+                    localStorage.removeItem('currentWorker');
+                    localStorage.removeItem('workerLoginTime');
+                    window.location.href = 'index.html';
+                } catch (error) {
+                    console.error('Logout error:', error);
+                    // Still clear localStorage and redirect even if logout time recording fails
+                    localStorage.removeItem('workerAuthenticated');
+                    localStorage.removeItem('currentWorker');
+                    localStorage.removeItem('workerLoginTime');
+                    window.location.href = 'index.html';
+                }
+            }
+        }
+
+        // Load worker profile
+        async function loadWorkerProfile() {
+            try {
+                const workerDoc = await window.getDoc(window.doc(window.db, "workers", currentWorker.uid));
+                
+                if (workerDoc.exists()) {
+                    const workerData = workerDoc.data();
+                    console.log('Worker profile loaded. Online status:', workerData.isOnline);
+                    
+                    // Update welcome title
+                    document.getElementById('welcomeTitle').textContent = `Welcome, ${workerData.firstName}!`;
+                    
+                    // Update welcome subtitle with login time
+                    const loginTime = localStorage.getItem('workerLoginTime') ? new Date(localStorage.getItem('workerLoginTime')).toLocaleString() : 'Session started';
+                    document.querySelector('.welcome-subtitle').textContent = `Logged in at ${loginTime} • Manage your tasks and track your progress`;
+                    
+                    // Update profile grid
+                    const profileGrid = document.getElementById('profileGrid');
+                    profileGrid.innerHTML = `
+                        <div class="profile-item">
+                            <div class="profile-label">Full Name</div>
+                            <div class="profile-value">${workerData.firstName} ${workerData.lastName}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Email Address</div>
+                            <div class="profile-value">${workerData.email}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Phone Number</div>
+                            <div class="profile-value">${workerData.phone}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Role/Position</div>
+                            <div class="profile-value">${formatRole(workerData.role)}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Experience</div>
+                            <div class="profile-value">${workerData.experience}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Account Status</div>
+                            <div class="profile-value">
+                                <span class="status-badge status-${workerData.status}">
+                                    ${workerData.status.toUpperCase()}
+                                </span>
+                            </div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Member Since</div>
+                            <div class="profile-value">${workerData.createdAt ? new Date(workerData.createdAt.toDate()).toLocaleDateString() : 'N/A'}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Last Login</div>
+                            <div class="profile-value">${workerData.lastLogin ? new Date(workerData.lastLogin.toDate()).toLocaleDateString() + ' ' + new Date(workerData.lastLogin.toDate()).toLocaleTimeString() : 'N/A'}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Current Session</div>
+                            <div class="profile-value">${localStorage.getItem('workerLoginTime') ? new Date(localStorage.getItem('workerLoginTime')).toLocaleDateString() + ' ' + new Date(localStorage.getItem('workerLoginTime')).toLocaleTimeString() : 'N/A'}</div>
+                        </div>
+                    `;
+
+                    // Update current worker data
+                    currentWorker = { ...currentWorker, ...workerData };
+                }
+            } catch (error) {
+                console.error('Error loading worker profile:', error);
+                document.getElementById('profileGrid').innerHTML = '<p style="color: #ff4757;">Error loading profile data</p>';
+            }
+        }
+
+        // Format role for display
+        function formatRole(role) {
+            return role.split('-').map(word => 
+                word.charAt(0).toUpperCase() + word.slice(1)
+            ).join(' ');
+        }
+
+        // Load worker tasks
+        async function loadWorkerTasks() {
+            try {
+                console.log('Loading tasks for worker:', currentWorker.uid);
+                
+                const q = window.query(
+                    window.collection(window.db, "tasks"),
+                    window.where("assignedTo", "==", currentWorker.uid)
+                );
+                
+                const querySnapshot = await window.getDocs(q);
+                console.log('Query completed, found', querySnapshot.size, 'tasks');
+                
+                workerTasks = [];
+                
+                querySnapshot.forEach((doc) => {
+                    const data = doc.data();
+                    console.log('Task data:', data);
+                    console.log('Task ID:', doc.id);
+                    console.log('Task assignedTo:', data.assignedTo);
+                    console.log('Current worker UID:', currentWorker.uid);
+                    workerTasks.push({
+                        id: doc.id,
+                        ...data
+                    });
+                });
+                
+                // Sort tasks by creation date (newest first)
+                workerTasks.sort((a, b) => {
+                    const dateA = a.createdAt ? a.createdAt.toDate() : new Date(0);
+                    const dateB = b.createdAt ? b.createdAt.toDate() : new Date(0);
+                    return dateB - dateA;
+                });
+
+                displayTasks();
+                updateTaskStats();
+                
+            } catch (error) {
+                console.error('Error loading tasks:', error);
+                
+                let errorMessage = 'Error loading tasks';
+                
+                if (error.code === 'permission-denied') {
+                    errorMessage = 'Permission denied. Please check if you are logged in correctly.';
+                } else if (error.code === 'unavailable') {
+                    errorMessage = 'Firebase service temporarily unavailable. Please try again.';
+                }
+                
+                document.getElementById('tasksList').innerHTML = `
+                    <div style="color: #ff4757; text-align: center; padding: 20px;">
+                        <p><strong>${errorMessage}</strong></p>
+                        <p>Error details: ${error.message}</p>
+                        <button onclick="loadWorkerTasks()" style="margin-top: 10px; padding: 8px 16px; background: #ef414b; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                            Try Again
+                        </button>
+                    </div>
+                `;
+            }
+        }
+
+        // Display tasks
+        function displayTasks() {
+            const tasksList = document.getElementById('tasksList');
+            
+            if (workerTasks.length === 0) {
+                tasksList.innerHTML = `
+                    <div class="no-tasks">
+                        <p>No tasks assigned yet.</p>
+                        <p>Tasks will appear here when assigned by the administrator.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            tasksList.innerHTML = workerTasks.map(task => `
+                <div class="task-card">
+                    <div class="task-header">
+                        <div class="task-title">${task.title || 'Untitled Task'}</div>
+                        <div class="task-status status-${task.status || 'assigned'}">
+                            ${(task.status || 'assigned').toUpperCase()}
+                        </div>
+                    </div>
+                                         <div class="task-details">
+                         <strong>Description:</strong> ${task.description || 'No description provided'}<br>
+                         <strong>Project:</strong> ${task.projectName || 'N/A'}<br>
+                         <strong>Priority:</strong> ${task.priority || 'Medium'}<br>
+                         <strong>Due Date:</strong> ${task.dueDate ? new Date(task.dueDate.toDate()).toLocaleDateString() : 'No due date'}<br>
+                         <strong>Assigned:</strong> ${task.createdAt ? new Date(task.createdAt.toDate()).toLocaleDateString() : 'N/A'}
+                         ${task.status === 'pending-approval' && task.submittedForApprovalAt ? `<br><strong>Submitted for Approval:</strong> ${new Date(task.submittedForApprovalAt.toDate()).toLocaleDateString()}` : ''}
+                         ${task.status === 'completed' && task.approvedAt ? `<br><strong>Approved:</strong> ${new Date(task.approvedAt.toDate()).toLocaleDateString()}` : ''}
+                     </div>
+                    <div class="task-actions">
+                        ${task.status === 'assigned' ? `
+                            <button class="task-btn btn-start" onclick="startTask('${task.id}')">
+                                Start Task
+                            </button>
+                        ` : ''}
+                                                 ${task.status === 'in-progress' ? `
+                             <button class="task-btn btn-complete" onclick="submitForApproval('${task.id}')">
+                                 Submit for Approval
+                             </button>
+                         ` : ''}
+                         ${task.status === 'pending-approval' ? `
+                             <button class="task-btn btn-view" style="background: #ffc107; color: #000;">
+                                 ⏳ Awaiting Admin Approval
+                             </button>
+                         ` : ''}
+                         ${task.status === 'in-progress' && task.rejectionReason ? `
+                             <button class="task-btn btn-view" style="background: #dc3545; color: white;" onclick="viewRejectionReason('${task.id}')">
+                                 ❌ View Rejection Reason
+                             </button>
+                         ` : ''}
+                        <button class="task-btn btn-view" onclick="viewTaskDetails('${task.id}')">
+                            View Details
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Update task statistics
+        function updateTaskStats() {
+            const totalTasks = workerTasks.length;
+            const completedTasks = workerTasks.filter(task => task.status === 'completed').length;
+            const pendingTasks = workerTasks.filter(task => task.status === 'assigned' || task.status === 'in-progress').length;
+            const pendingApprovalTasks = workerTasks.filter(task => task.status === 'pending-approval').length;
+            const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+
+            document.getElementById('totalTasks').textContent = totalTasks;
+            document.getElementById('completedTasks').textContent = completedTasks;
+            document.getElementById('pendingTasks').textContent = pendingTasks + pendingApprovalTasks;
+            document.getElementById('completionRate').textContent = `${completionRate}%`;
+            
+            // Update session duration
+            updateSessionDuration();
+        }
+        
+        // Update session duration
+        function updateSessionDuration() {
+            const loginTime = localStorage.getItem('workerLoginTime');
+            if (loginTime) {
+                const loginDate = new Date(loginTime);
+                const now = new Date();
+                const duration = now - loginDate;
+                
+                const hours = Math.floor(duration / (1000 * 60 * 60));
+                const minutes = Math.floor((duration % (1000 * 60 * 60)) / (1000 * 60));
+                const seconds = Math.floor((duration % (1000 * 60)) / 1000);
+                
+                const sessionDuration = `${hours}h ${minutes}m ${seconds}s`;
+                document.getElementById('sessionDuration').textContent = sessionDuration;
+                
+                // Update header session time
+                const loginTimeString = loginDate.toLocaleTimeString();
+                document.getElementById('headerSessionTime').textContent = `🕐 ${loginTimeString} (${sessionDuration})`;
+            } else {
+                document.getElementById('sessionDuration').textContent = 'Session time unavailable';
+                document.getElementById('headerSessionTime').textContent = '🕐 Session time unavailable';
+            }
+        }
+
+        // Start task
+        async function startTask(taskId) {
+            try {
+                await window.updateDoc(window.doc(window.db, "tasks", taskId), {
+                    status: 'in-progress',
+                    startedAt: window.serverTimestamp()
+                });
+                
+                // Update local data
+                const taskIndex = workerTasks.findIndex(task => task.id === taskId);
+                if (taskIndex !== -1) {
+                    workerTasks[taskIndex].status = 'in-progress';
+                    workerTasks[taskIndex].startedAt = new Date();
+                    displayTasks();
+                    updateTaskStats();
+                }
+                
+                alert('Task started successfully!');
+            } catch (error) {
+                console.error('Error starting task:', error);
+                alert('Error starting task. Please try again.');
+            }
+        }
+
+        // Submit task for approval
+        async function submitForApproval(taskId) {
+            try {
+                console.log('Submitting task for approval:', taskId);
+                console.log('Current worker:', currentWorker);
+                console.log('Firebase functions available:', {
+                    updateDoc: typeof window.updateDoc,
+                    doc: typeof window.doc,
+                    db: typeof window.db,
+                    serverTimestamp: typeof window.serverTimestamp
+                });
+                
+                await window.updateDoc(window.doc(window.db, "tasks", taskId), {
+                    status: 'pending-approval',
+                    submittedForApprovalAt: window.serverTimestamp()
+                });
+                
+                // Update local data
+                const taskIndex = workerTasks.findIndex(task => task.id === taskId);
+                if (taskIndex !== -1) {
+                    workerTasks[taskIndex].status = 'pending-approval';
+                    workerTasks[taskIndex].submittedForApprovalAt = new Date();
+                    displayTasks();
+                    updateTaskStats();
+                }
+                
+                alert('Task submitted for approval! Admin will review and approve your work.');
+            } catch (error) {
+                console.error('Error submitting task for approval:', error);
+                console.error('Error code:', error.code);
+                console.error('Error message:', error.message);
+                console.error('Error details:', error);
+                
+                let errorMessage = 'Error submitting task for approval. Please try again.';
+                
+                if (error.code === 'permission-denied') {
+                    errorMessage = 'Permission denied. You may not have permission to update this task.';
+                } else if (error.code === 'not-found') {
+                    errorMessage = 'Task not found. The task may have been deleted.';
+                } else if (error.code === 'unavailable') {
+                    errorMessage = 'Firebase service temporarily unavailable. Please try again.';
+                }
+                
+                alert(errorMessage);
+            }
+        }
+
+        // View task details
+        function viewTaskDetails(taskId) {
+            const task = workerTasks.find(task => task.id === taskId);
+            if (task) {
+                const details = `
+Task Details:
+- Title: ${task.title || 'Untitled Task'}
+- Description: ${task.description || 'No description provided'}
+- Project: ${task.projectName || 'N/A'}
+- Priority: ${task.priority || 'Medium'}
+- Status: ${task.status || 'Assigned'}
+- Due Date: ${task.dueDate ? new Date(task.dueDate.toDate()).toLocaleDateString() : 'No due date'}
+- Assigned: ${task.createdAt ? new Date(task.createdAt.toDate()).toLocaleDateString() : 'N/A'}
+                `;
+                alert(details);
+            }
+        }
+
+        // View rejection reason
+        function viewRejectionReason(taskId) {
+            const task = workerTasks.find(task => task.id === taskId);
+            if (task && task.rejectionReason) {
+                alert(`Task Rejection Reason:\n\n${task.rejectionReason}\n\nPlease make the necessary changes and submit for approval again.`);
+            }
+        }
+
+        // Initialize dashboard
+        async function initDashboard() {
+            if (!checkAuth()) return;
+
+            await Promise.all([
+                loadWorkerProfile(),
+                loadWorkerTasks()
+            ]);
+            
+            // Mark page as fully loaded after initialization
+            pageFullyLoaded = true;
+        }
+
+        // Check session timeout
+        function checkSessionTimeout() {
+            const loginTime = localStorage.getItem('workerLoginTime');
+            if (loginTime) {
+                const loginDate = new Date(loginTime);
+                const currentDate = new Date();
+                const timeDiff = currentDate.getTime() - loginDate.getTime();
+                const hoursDiff = timeDiff / (1000 * 60 * 60);
+                
+                if (hoursDiff > 8) {
+                    alert('Your session has expired. Please login again.');
+                    logout();
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Initialize when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            initDashboard();
+            
+            // Update session duration every second
+            setInterval(() => {
+                updateSessionDuration();
+            }, 1000);
+            
+            // Check session timeout every 5 minutes
+            setInterval(() => {
+                if (!checkSessionTimeout()) {
+                    window.location.href = 'worker-login-firebase.html';
+                }
+            }, 5 * 60 * 1000);
+            
+            // Handle page unload to record logout time
+            window.addEventListener('beforeunload', async function() {
+                // Only set offline if worker is properly authenticated, loaded, and page is fully initialized
+                const isAuthenticated = localStorage.getItem('workerAuthenticated');
+                if (isAuthenticated === 'true' && currentWorker && currentWorker.uid && pageFullyLoaded) {
+                    try {
+                        console.log('Setting worker offline due to page unload');
+                        await window.updateDoc(window.doc(window.db, "workers", currentWorker.uid), {
+                            lastLogout: window.serverTimestamp(),
+                            isOnline: false
+                        });
+                    } catch (error) {
+                        console.error('Error recording logout time:', error);
+                    }
+                }
+            });
+        });
+    </script>
+</body>
+</html> 
