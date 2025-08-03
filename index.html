@@ -383,13 +383,9 @@
 
                 showSuccess('Login successful! Redirecting to dashboard...');
                 
-                // Redirect based on role after 2 seconds
+                // Redirect to worker dashboard after 2 seconds
                 setTimeout(() => {
-                    if (workerData.role === 'account-manager') {
-                        window.location.href = 'account-manager-dashboard-firebase.html';
-                    } else {
-                        window.location.href = 'worker-dashboard-firebase.html';
-                    }
+                    window.location.href = 'worker-dashboard-firebase.html';
                 }, 2000);
 
             } catch (error) {
@@ -449,17 +445,7 @@
         document.addEventListener('DOMContentLoaded', function() {
             const isAuthenticated = localStorage.getItem('workerAuthenticated');
             if (isAuthenticated === 'true') {
-                const workerData = localStorage.getItem('currentWorker');
-                if (workerData) {
-                    const worker = JSON.parse(workerData);
-                    if (worker.role === 'account-manager') {
-                        window.location.href = 'account-manager-dashboard-firebase.html';
-                    } else {
-                        window.location.href = 'worker-dashboard-firebase.html';
-                    }
-                } else {
-                    window.location.href = 'worker-dashboard-firebase.html';
-                }
+                window.location.href = 'worker-dashboard-firebase.html';
             }
         });
     </script>
