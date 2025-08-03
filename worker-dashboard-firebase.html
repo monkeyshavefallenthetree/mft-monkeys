@@ -601,7 +601,7 @@
         let pageFullyLoaded = false;
 
         // Check authentication
-        async function checkAuth() {
+        function checkAuth() {
             const isAuthenticated = localStorage.getItem('workerAuthenticated');
             const workerData = localStorage.getItem('currentWorker');
             
@@ -611,21 +611,6 @@
             }
 
             currentWorker = JSON.parse(workerData);
-            
-            // Check if user is an account manager and redirect to account manager dashboard
-            try {
-                const workerDoc = await window.getDoc(window.doc(window.db, "workers", currentWorker.uid));
-                if (workerDoc.exists()) {
-                    const userData = workerDoc.data();
-                    if (userData.role === 'account-manager') {
-                        window.location.href = 'account-manager-dashboard-firebase.html';
-                        return false;
-                    }
-                }
-            } catch (error) {
-                console.error('Error checking user role:', error);
-            }
-            
             return true;
         }
 
@@ -994,7 +979,7 @@ Task Details:
 
         // Initialize dashboard
         async function initDashboard() {
-            if (!(await checkAuth())) return;
+            if (!checkAuth()) return;
 
             await Promise.all([
                 loadWorkerProfile(),
