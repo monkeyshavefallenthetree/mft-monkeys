@@ -9,7 +9,7 @@
     <script type="module">
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
         import { getAuth, signOut } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
-        import { getFirestore, doc, getDoc, updateDoc, collection, query, where, orderBy, getDocs, onSnapshot, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+                 import { getFirestore, doc, getDoc, updateDoc, collection, query, where, orderBy, getDocs, onSnapshot, serverTimestamp, addDoc } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
         
         // Firebase configuration
         const firebaseConfig = {
@@ -27,20 +27,21 @@
         const auth = getAuth(app);
         const db = getFirestore(app);
 
-        // Make Firebase functions available globally
-        window.auth = auth;
-        window.signOut = signOut;
-        window.db = db;
-        window.doc = doc;
-        window.getDoc = getDoc;
-        window.updateDoc = updateDoc;
-        window.collection = collection;
-        window.query = query;
-        window.where = where;
-        window.orderBy = orderBy;
-        window.getDocs = getDocs;
-        window.onSnapshot = onSnapshot;
-        window.serverTimestamp = serverTimestamp;
+                 // Make Firebase functions available globally
+         window.auth = auth;
+         window.signOut = signOut;
+         window.db = db;
+         window.doc = doc;
+         window.getDoc = getDoc;
+         window.updateDoc = updateDoc;
+         window.collection = collection;
+         window.query = query;
+         window.where = where;
+         window.orderBy = orderBy;
+         window.getDocs = getDocs;
+         window.onSnapshot = onSnapshot;
+         window.serverTimestamp = serverTimestamp;
+         window.addDoc = addDoc;
     </script>
 
     <style>
@@ -439,6 +440,242 @@
             font-style: italic;
         }
 
+        /* Exception Section */
+        .exception-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        .exception-header {
+            margin-bottom: 25px;
+        }
+
+        .exception-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #ef414b;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .exception-title::before {
+            content: '⚠️';
+            font-size: 1.2rem;
+        }
+
+        .exception-subtitle {
+            color: #cccccc;
+            font-size: 1rem;
+        }
+
+        .exception-form-container {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 25px;
+        }
+
+        .exception-form {
+            display: grid;
+            gap: 20px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .form-group label {
+            color: #ffffff;
+            font-weight: 600;
+            font-size: 0.95rem;
+        }
+
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            padding: 12px 15px;
+            color: #ffffff;
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #ef414b;
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .form-group input::placeholder,
+        .form-group textarea::placeholder {
+            color: #888888;
+        }
+
+        .form-actions {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+        }
+
+        .submit-exception-btn {
+            background: #ef414b;
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+            flex: 1;
+        }
+
+        .submit-exception-btn:hover {
+            background: #d63641;
+            transform: translateY(-1px);
+        }
+
+        .clear-form-btn {
+            background: transparent;
+            color: #cccccc;
+            border: 1px solid #cccccc;
+            padding: 12px 25px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+        }
+
+        .clear-form-btn:hover {
+            background: #cccccc;
+            color: #000000;
+        }
+
+        /* Exception History Section */
+        .exception-history-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        .exception-history-header {
+            margin-bottom: 25px;
+        }
+
+        .exception-history-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #ef414b;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .exception-history-title::before {
+            content: '📋';
+            font-size: 1.2rem;
+        }
+
+        .exception-history-subtitle {
+            color: #cccccc;
+            font-size: 1rem;
+        }
+
+        .exception-history-list {
+            display: grid;
+            gap: 15px;
+        }
+
+        .exception-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 20px;
+            transition: all 0.3s ease;
+        }
+
+        .exception-card:hover {
+            border-color: rgba(239, 65, 75, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .exception-header-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .exception-type {
+            font-weight: 600;
+            color: #ffffff;
+            font-size: 1.1rem;
+        }
+
+        .exception-status {
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .status-pending {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+            border: 1px solid rgba(255, 193, 7, 0.3);
+        }
+
+        .status-approved {
+            background: rgba(40, 167, 69, 0.2);
+            color: #28a745;
+            border: 1px solid rgba(40, 167, 69, 0.3);
+        }
+
+        .status-rejected {
+            background: rgba(220, 53, 69, 0.2);
+            color: #dc3545;
+            border: 1px solid rgba(220, 53, 69, 0.3);
+        }
+
+        .exception-details {
+            color: #cccccc;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            margin-bottom: 15px;
+        }
+
+        .exception-meta {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            font-size: 0.85rem;
+            color: #888888;
+        }
+
+        .no-exceptions {
+            text-align: center;
+            color: #888888;
+            padding: 40px;
+            font-style: italic;
+        }
+
         /* Loading */
         .loading {
             text-align: center;
@@ -519,6 +756,19 @@
             .task-actions {
                 justify-content: flex-start;
             }
+
+            .exception-form {
+                gap: 15px;
+            }
+
+            .form-actions {
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            .exception-meta {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -581,6 +831,65 @@
             </div>
         </section>
 
+        <!-- Exception Submission Section -->
+        <section class="exception-section">
+            <div class="exception-header">
+                <h2 class="exception-title">Submit Exception</h2>
+                <p class="exception-subtitle">Report late arrival or absence with explanation</p>
+            </div>
+            <div class="exception-form-container">
+                <form id="exceptionForm" class="exception-form">
+                    <div class="form-group">
+                        <label for="exceptionType">Exception Type:</label>
+                        <select id="exceptionType" name="exceptionType" required>
+                            <option value="">Select exception type</option>
+                            <option value="late">Late Arrival (30-120 minutes)</option>
+                            <option value="absent">Absent for the Day</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group" id="lateMinutesGroup" style="display: none;">
+                        <label for="lateMinutes">Minutes Late:</label>
+                        <input type="number" id="lateMinutes" name="lateMinutes" min="30" max="120" placeholder="Enter minutes (30-120)">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="exceptionDate">Date of Exception:</label>
+                        <input type="date" id="exceptionDate" name="exceptionDate" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="exceptionReason">Reason/Explanation:</label>
+                        <textarea id="exceptionReason" name="exceptionReason" rows="4" placeholder="Please provide a detailed explanation for your late arrival or absence..." required></textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="supportingEvidence">Supporting Evidence (Optional):</label>
+                        <textarea id="supportingEvidence" name="supportingEvidence" rows="3" placeholder="Any additional information, documents, or evidence that supports your explanation..."></textarea>
+                    </div>
+                    
+                    <div class="form-actions">
+                        <button type="submit" class="submit-exception-btn">Submit Exception</button>
+                        <button type="button" class="clear-form-btn" onclick="clearExceptionForm()">Clear Form</button>
+                    </div>
+                </form>
+            </div>
+        </section>
+
+        <!-- Exception History Section -->
+        <section class="exception-history-section">
+            <div class="exception-history-header">
+                <h2 class="exception-history-title">Exception History</h2>
+                <p class="exception-history-subtitle">View your submitted exceptions and their status</p>
+            </div>
+            <div class="exception-history-list" id="exceptionHistoryList">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading exception history...</p>
+                </div>
+            </div>
+        </section>
+
         <!-- Tasks Section -->
         <section class="tasks-section">
             <div class="tasks-header">
@@ -596,9 +905,11 @@
     </main>
 
     <script>
-        let currentWorker = null;
-        let workerTasks = [];
-        let pageFullyLoaded = false;
+                 let currentWorker = null;
+         let workerTasks = [];
+         let workerExceptions = [];
+         let pageFullyLoaded = false;
+         let currentWorkSession = null;
 
         // Check authentication
         function checkAuth() {
@@ -614,33 +925,36 @@
             return true;
         }
 
-        // Logout function
-        async function logout() {
-            if (confirm('Are you sure you want to logout?')) {
-                try {
-                    // Record logout time before signing out
-                    if (currentWorker && currentWorker.uid) {
-                        await window.updateDoc(window.doc(window.db, "workers", currentWorker.uid), {
-                            lastLogout: window.serverTimestamp(),
-                            isOnline: false
-                        });
-                    }
-                    
-                    await window.signOut(window.auth);
-                    localStorage.removeItem('workerAuthenticated');
-                    localStorage.removeItem('currentWorker');
-                    localStorage.removeItem('workerLoginTime');
-                    window.location.href = 'index.html';
-                } catch (error) {
-                    console.error('Logout error:', error);
-                    // Still clear localStorage and redirect even if logout time recording fails
-                    localStorage.removeItem('workerAuthenticated');
-                    localStorage.removeItem('currentWorker');
-                    localStorage.removeItem('workerLoginTime');
-                    window.location.href = 'index.html';
-                }
-            }
-        }
+                 // Logout function
+         async function logout() {
+             if (confirm('Are you sure you want to logout?')) {
+                 try {
+                     // End work session tracking
+                     await endWorkSession();
+                     
+                     // Record logout time before signing out
+                     if (currentWorker && currentWorker.uid) {
+                         await window.updateDoc(window.doc(window.db, "workers", currentWorker.uid), {
+                             lastLogout: window.serverTimestamp(),
+                             isOnline: false
+                         });
+                     }
+                     
+                     await window.signOut(window.auth);
+                     localStorage.removeItem('workerAuthenticated');
+                     localStorage.removeItem('currentWorker');
+                     localStorage.removeItem('workerLoginTime');
+                     window.location.href = 'index.html';
+                 } catch (error) {
+                     console.error('Logout error:', error);
+                     // Still clear localStorage and redirect even if logout time recording fails
+                     localStorage.removeItem('workerAuthenticated');
+                     localStorage.removeItem('currentWorker');
+                     localStorage.removeItem('workerLoginTime');
+                     window.location.href = 'index.html';
+                 }
+             }
+         }
 
         // Load worker profile
         async function loadWorkerProfile() {
@@ -682,6 +996,44 @@
                             <div class="profile-value">${workerData.experience}</div>
                         </div>
                         <div class="profile-item">
+                            <div class="profile-label">Department</div>
+                            <div class="profile-value">${workerData.department || 'N/A'}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Work Type</div>
+                            <div class="profile-value">${formatWorkType(workerData.employmentType)}</div>
+                        </div>
+                         <div class="profile-item">
+                             <div class="profile-label">Expected Monthly Salary</div>
+                             <div class="profile-value">
+                                 <div style="display: flex; align-items: center; gap: 10px;">
+                                     <span id="expectedSalaryDisplay">${workerData.expectedSalary ? `EGP ${workerData.expectedSalary}` : 'Not set'}</span>
+                                     <button onclick="editExpectedSalary()" style="background: #ef414b; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; cursor: pointer;">Edit</button>
+                                 </div>
+                                 <div id="expectedSalaryEditForm" style="display: none; margin-top: 10px;">
+                                     <input type="number" id="expectedSalaryInput" min="0" step="0.01" value="${workerData.expectedSalary || ''}" style="width: 120px; padding: 5px; border: 1px solid #ef414b; border-radius: 4px; background: rgba(255, 255, 255, 0.1); color: white;">
+                                     <button onclick="saveExpectedSalary()" style="background: #28a745; color: white; border: none; padding: 5px 10px; border-radius: 4px; font-size: 0.8rem; cursor: pointer; margin-left: 5px;">Save</button>
+                                     <button onclick="cancelEditExpectedSalary()" style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 4px; font-size: 0.8rem; cursor: pointer; margin-left: 5px;">Cancel</button>
+                                 </div>
+                             </div>
+                         </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Location</div>
+                            <div class="profile-value">${workerData.government || 'N/A'}, ${workerData.city || 'N/A'}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Skills</div>
+                            <div class="profile-value">${workerData.skills && workerData.skills.length > 0 ? workerData.skills.join(', ') : 'Not specified'}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Portfolio Link</div>
+                            <div class="profile-value">${workerData.portfolioLink ? `<a href="${workerData.portfolioLink}" target="_blank" style="color: #ef414b;">View Portfolio</a>` : 'Not provided'}</div>
+                        </div>
+                                                 <div class="profile-item">
+                             <div class="profile-label">Time to Leave Current Job</div>
+                             <div class="profile-value">${workerData.netspend || 'Not specified'}</div>
+                         </div>
+                        <div class="profile-item">
                             <div class="profile-label">Account Status</div>
                             <div class="profile-value">
                                 <span class="status-badge status-${workerData.status}">
@@ -715,6 +1067,14 @@
         // Format role for display
         function formatRole(role) {
             return role.split('-').map(word => 
+                word.charAt(0).toUpperCase() + word.slice(1)
+            ).join(' ');
+        }
+
+        // Format work type for display
+        function formatWorkType(workType) {
+            if (!workType) return 'N/A';
+            return workType.split('-').map(word => 
                 word.charAt(0).toUpperCase() + word.slice(1)
             ).join(' ');
         }
@@ -856,29 +1216,34 @@
             updateSessionDuration();
         }
         
-        // Update session duration
-        function updateSessionDuration() {
-            const loginTime = localStorage.getItem('workerLoginTime');
-            if (loginTime) {
-                const loginDate = new Date(loginTime);
-                const now = new Date();
-                const duration = now - loginDate;
-                
-                const hours = Math.floor(duration / (1000 * 60 * 60));
-                const minutes = Math.floor((duration % (1000 * 60 * 60)) / (1000 * 60));
-                const seconds = Math.floor((duration % (1000 * 60)) / 1000);
-                
-                const sessionDuration = `${hours}h ${minutes}m ${seconds}s`;
-                document.getElementById('sessionDuration').textContent = sessionDuration;
-                
-                // Update header session time
-                const loginTimeString = loginDate.toLocaleTimeString();
-                document.getElementById('headerSessionTime').textContent = `🕐 ${loginTimeString} (${sessionDuration})`;
-            } else {
-                document.getElementById('sessionDuration').textContent = 'Session time unavailable';
-                document.getElementById('headerSessionTime').textContent = '🕐 Session time unavailable';
-            }
-        }
+                 // Update session duration
+         function updateSessionDuration() {
+             const loginTime = localStorage.getItem('workerLoginTime');
+             if (loginTime) {
+                 const loginDate = new Date(loginTime);
+                 const now = new Date();
+                 const duration = now - loginDate;
+                 
+                 const hours = Math.floor(duration / (1000 * 60 * 60));
+                 const minutes = Math.floor((duration % (1000 * 60 * 60)) / (1000 * 60));
+                 const seconds = Math.floor((duration % (1000 * 60)) / 1000);
+                 
+                 const sessionDuration = `${hours}h ${minutes}m ${seconds}s`;
+                 document.getElementById('sessionDuration').textContent = sessionDuration;
+                 
+                 // Update header session time
+                 const loginTimeString = loginDate.toLocaleTimeString();
+                 document.getElementById('headerSessionTime').textContent = `🕐 ${loginTimeString} (${sessionDuration})`;
+                 
+                 // Update work session periodically
+                 if (currentWorkSession) {
+                     updateWorkSessionInFirebase();
+                 }
+             } else {
+                 document.getElementById('sessionDuration').textContent = 'Session time unavailable';
+                 document.getElementById('headerSessionTime').textContent = '🕐 Session time unavailable';
+             }
+         }
 
         // Start task
         async function startTask(taskId) {
@@ -977,40 +1342,346 @@ Task Details:
             }
         }
 
-        // Initialize dashboard
-        async function initDashboard() {
-            if (!checkAuth()) return;
+                 // Initialize work session tracking
+         async function initializeWorkSession() {
+             try {
+                 const loginTime = localStorage.getItem('workerLoginTime');
+                 if (!loginTime || !currentWorker) return;
 
-            await Promise.all([
-                loadWorkerProfile(),
-                loadWorkerTasks()
-            ]);
-            
-            // Mark page as fully loaded after initialization
-            pageFullyLoaded = true;
-        }
+                 // Create new work session record
+                 const sessionDoc = await window.addDoc(window.collection(window.db, 'workSessions'), {
+                     workerId: currentWorker.uid,
+                     workerName: `${currentWorker.firstName} ${currentWorker.lastName}`,
+                     workerEmail: currentWorker.email,
+                     loginTime: new Date(loginTime),
+                     startTime: new Date(loginTime),
+                     isActive: true,
+                     totalWorkTime: 0,
+                     date: new Date().toISOString().split('T')[0], // YYYY-MM-DD format
+                     createdAt: window.serverTimestamp()
+                 });
 
-        // Check session timeout
-        function checkSessionTimeout() {
-            const loginTime = localStorage.getItem('workerLoginTime');
-            if (loginTime) {
-                const loginDate = new Date(loginTime);
-                const currentDate = new Date();
-                const timeDiff = currentDate.getTime() - loginDate.getTime();
-                const hoursDiff = timeDiff / (1000 * 60 * 60);
-                
-                if (hoursDiff > 8) {
-                    alert('Your session has expired. Please login again.');
-                    logout();
-                    return false;
-                }
-            }
-            return true;
-        }
+                 currentWorkSession = {
+                     id: sessionDoc.id,
+                     startTime: new Date(loginTime),
+                     isActive: true
+                 };
+
+                 console.log('Work session initialized:', currentWorkSession);
+             } catch (error) {
+                 console.error('Error initializing work session:', error);
+             }
+         }
+
+         // Update work session in Firebase
+         async function updateWorkSessionInFirebase() {
+             if (!currentWorkSession) return;
+
+             try {
+                 const now = new Date();
+                 const totalWorkTime = now - currentWorkSession.startTime;
+
+                 await window.updateDoc(window.doc(window.db, 'workSessions', currentWorkSession.id), {
+                     totalWorkTime: totalWorkTime,
+                     lastUpdated: window.serverTimestamp()
+                 });
+
+                 console.log('Work session updated in Firebase');
+             } catch (error) {
+                 console.error('Error updating work session:', error);
+             }
+         }
+
+         // End work session when logging out
+         async function endWorkSession() {
+             if (!currentWorkSession) return;
+
+             try {
+                 const logoutTime = new Date();
+                 const totalWorkTime = logoutTime - currentWorkSession.startTime;
+
+                 await window.updateDoc(window.doc(window.db, 'workSessions', currentWorkSession.id), {
+                     logoutTime: logoutTime,
+                     endTime: logoutTime,
+                     isActive: false,
+                     totalWorkTime: totalWorkTime,
+                     completedAt: window.serverTimestamp()
+                 });
+
+                 console.log('Work session ended:', {
+                     totalWorkTime: Math.round(totalWorkTime / 1000 / 60)
+                 });
+             } catch (error) {
+                 console.error('Error ending work session:', error);
+             }
+         }
+
+         // Initialize dashboard
+         async function initDashboard() {
+             if (!checkAuth()) return;
+
+             await Promise.all([
+                 loadWorkerProfile(),
+                 loadWorkerTasks(),
+                 loadWorkerExceptions(),
+                 initializeWorkSession()
+             ]);
+             
+             // Mark page as fully loaded after initialization
+             pageFullyLoaded = true;
+         }
+
+         // Load worker exceptions
+         async function loadWorkerExceptions() {
+             try {
+                 console.log('Loading exceptions for worker:', currentWorker.uid);
+                 
+                 const q = window.query(
+                     window.collection(window.db, "exceptions"),
+                     window.where("workerId", "==", currentWorker.uid),
+                     window.orderBy("createdAt", "desc")
+                 );
+                 
+                 const querySnapshot = await window.getDocs(q);
+                 console.log('Exceptions query completed, found', querySnapshot.size, 'exceptions');
+                 
+                 workerExceptions = [];
+                 
+                 querySnapshot.forEach((doc) => {
+                     const data = doc.data();
+                     workerExceptions.push({
+                         id: doc.id,
+                         ...data
+                     });
+                 });
+
+                 displayExceptions();
+                 
+             } catch (error) {
+                 console.error('Error loading exceptions:', error);
+                 
+                 let errorMessage = 'Error loading exceptions';
+                 
+                 if (error.code === 'permission-denied') {
+                     errorMessage = 'Permission denied. Please check if you are logged in correctly.';
+                 } else if (error.code === 'unavailable') {
+                     errorMessage = 'Firebase service temporarily unavailable. Please try again.';
+                 }
+                 
+                 document.getElementById('exceptionHistoryList').innerHTML = `
+                     <div style="color: #ff4757; text-align: center; padding: 20px;">
+                         <p><strong>${errorMessage}</strong></p>
+                         <p>Error details: ${error.message}</p>
+                         <button onclick="loadWorkerExceptions()" style="margin-top: 10px; padding: 8px 16px; background: #ef414b; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                             Try Again
+                         </button>
+                     </div>
+                 `;
+             }
+         }
+
+         // Display exceptions
+         function displayExceptions() {
+             const exceptionHistoryList = document.getElementById('exceptionHistoryList');
+             
+             if (workerExceptions.length === 0) {
+                 exceptionHistoryList.innerHTML = `
+                     <div class="no-exceptions">
+                         <p>No exceptions submitted yet.</p>
+                         <p>Your submitted exceptions will appear here.</p>
+                     </div>
+                 `;
+                 return;
+             }
+
+             exceptionHistoryList.innerHTML = workerExceptions.map(exception => `
+                 <div class="exception-card">
+                     <div class="exception-header-info">
+                         <div class="exception-type">
+                             ${exception.type === 'late' ? '🚨 Late Arrival' : '❌ Absent for the Day'}
+                             ${exception.type === 'late' && exception.lateMinutes ? ` (${exception.lateMinutes} minutes)` : ''}
+                         </div>
+                         <div class="exception-status status-${exception.status || 'pending'}">
+                             ${(exception.status || 'pending').toUpperCase()}
+                         </div>
+                     </div>
+                     <div class="exception-details">
+                         <strong>Reason:</strong> ${exception.reason || 'No reason provided'}<br>
+                         ${exception.supportingEvidence ? `<strong>Supporting Evidence:</strong> ${exception.supportingEvidence}<br>` : ''}
+                         ${exception.adminResponse ? `<strong>Admin Response:</strong> ${exception.adminResponse}<br>` : ''}
+                     </div>
+                     <div class="exception-meta">
+                         <div><strong>Date:</strong> ${exception.exceptionDate ? new Date(exception.exceptionDate).toLocaleDateString() : 'N/A'}</div>
+                         <div><strong>Submitted:</strong> ${exception.createdAt ? new Date(exception.createdAt.toDate()).toLocaleDateString() + ' ' + new Date(exception.createdAt.toDate()).toLocaleTimeString() : 'N/A'}</div>
+                         ${exception.reviewedAt ? `<div><strong>Reviewed:</strong> ${new Date(exception.reviewedAt.toDate()).toLocaleDateString() + ' ' + new Date(exception.reviewedAt.toDate()).toLocaleTimeString()}</div>` : ''}
+                     </div>
+                 </div>
+             `).join('');
+         }
+
+         // Handle exception form submission
+         async function submitException(event) {
+             event.preventDefault();
+             
+             const formData = new FormData(event.target);
+             const exceptionData = {
+                 type: formData.get('exceptionType'),
+                 lateMinutes: formData.get('lateMinutes') ? parseInt(formData.get('lateMinutes')) : null,
+                 exceptionDate: formData.get('exceptionDate'),
+                 reason: formData.get('exceptionReason'),
+                 supportingEvidence: formData.get('supportingEvidence') || null
+             };
+
+             // Validation
+             if (exceptionData.type === 'late' && (!exceptionData.lateMinutes || exceptionData.lateMinutes < 30 || exceptionData.lateMinutes > 120)) {
+                 alert('For late arrival, please enter minutes between 30 and 120.');
+                 return;
+             }
+
+             if (!exceptionData.reason.trim()) {
+                 alert('Please provide a reason for your exception.');
+                 return;
+             }
+
+             try {
+                 // Submit exception to Firebase
+                 const exceptionDoc = await window.addDoc(window.collection(window.db, "exceptions"), {
+                     workerId: currentWorker.uid,
+                     workerName: `${currentWorker.firstName} ${currentWorker.lastName}`,
+                     workerEmail: currentWorker.email,
+                     type: exceptionData.type,
+                     lateMinutes: exceptionData.lateMinutes,
+                     exceptionDate: exceptionData.exceptionDate,
+                     reason: exceptionData.reason.trim(),
+                     supportingEvidence: exceptionData.supportingEvidence,
+                     status: 'pending',
+                     createdAt: window.serverTimestamp()
+                 });
+
+                 console.log('Exception submitted successfully:', exceptionDoc.id);
+
+                 // Add to local array
+                 workerExceptions.unshift({
+                     id: exceptionDoc.id,
+                     workerId: currentWorker.uid,
+                     workerName: `${currentWorker.firstName} ${currentWorker.lastName}`,
+                     workerEmail: currentWorker.email,
+                     type: exceptionData.type,
+                     lateMinutes: exceptionData.lateMinutes,
+                     exceptionDate: exceptionData.exceptionDate,
+                     reason: exceptionData.reason.trim(),
+                     supportingEvidence: exceptionData.supportingEvidence,
+                     status: 'pending',
+                     createdAt: new Date()
+                 });
+
+                 // Update display
+                 displayExceptions();
+
+                 // Clear form
+                 clearExceptionForm();
+
+                 alert('Exception submitted successfully! Admin will review your request.');
+
+             } catch (error) {
+                 console.error('Error submitting exception:', error);
+                 alert('Error submitting exception. Please try again.');
+             }
+         }
+
+         // Clear exception form
+         function clearExceptionForm() {
+             document.getElementById('exceptionForm').reset();
+             document.getElementById('lateMinutesGroup').style.display = 'none';
+         }
+
+         // Handle exception type change
+         function handleExceptionTypeChange() {
+             const exceptionType = document.getElementById('exceptionType').value;
+             const lateMinutesGroup = document.getElementById('lateMinutesGroup');
+             const lateMinutesInput = document.getElementById('lateMinutes');
+
+             if (exceptionType === 'late') {
+                 lateMinutesGroup.style.display = 'flex';
+                 lateMinutesInput.required = true;
+             } else {
+                 lateMinutesGroup.style.display = 'none';
+                 lateMinutesInput.required = false;
+                 lateMinutesInput.value = '';
+             }
+         }
+
+                 // Edit expected salary
+         function editExpectedSalary() {
+             document.getElementById('expectedSalaryDisplay').style.display = 'none';
+             document.getElementById('expectedSalaryEditForm').style.display = 'block';
+             document.getElementById('expectedSalaryInput').focus();
+         }
+
+         // Save expected salary
+         async function saveExpectedSalary() {
+             const newSalary = parseFloat(document.getElementById('expectedSalaryInput').value);
+             
+             if (!newSalary || newSalary < 0) {
+                 alert('Please enter a valid salary amount.');
+                 return;
+             }
+
+             try {
+                 await window.updateDoc(window.doc(window.db, "workers", currentWorker.uid), {
+                     expectedSalary: newSalary
+                 });
+
+                 // Update local data
+                 currentWorker.expectedSalary = newSalary;
+                 
+                 // Update display
+                 document.getElementById('expectedSalaryDisplay').textContent = `EGP ${newSalary}`;
+                 document.getElementById('expectedSalaryDisplay').style.display = 'inline';
+                 document.getElementById('expectedSalaryEditForm').style.display = 'none';
+                 
+                 alert('Expected salary updated successfully!');
+             } catch (error) {
+                 console.error('Error updating expected salary:', error);
+                 alert('Error updating expected salary. Please try again.');
+             }
+         }
+
+         // Cancel editing expected salary
+         function cancelEditExpectedSalary() {
+             document.getElementById('expectedSalaryInput').value = currentWorker.expectedSalary || '';
+             document.getElementById('expectedSalaryDisplay').style.display = 'inline';
+             document.getElementById('expectedSalaryEditForm').style.display = 'none';
+         }
+
+         // Check session timeout
+         function checkSessionTimeout() {
+             const loginTime = localStorage.getItem('workerLoginTime');
+             if (loginTime) {
+                 const loginDate = new Date(loginTime);
+                 const currentDate = new Date();
+                 const timeDiff = currentDate.getTime() - loginDate.getTime();
+                 const hoursDiff = timeDiff / (1000 * 60 * 60);
+                 
+                 if (hoursDiff > 8) {
+                     alert('Your session has expired. Please login again.');
+                     logout();
+                     return false;
+                 }
+             }
+             return true;
+         }
 
         // Initialize when page loads
         document.addEventListener('DOMContentLoaded', function() {
             initDashboard();
+            
+            // Add event listeners for exception form
+            document.getElementById('exceptionForm').addEventListener('submit', submitException);
+            document.getElementById('exceptionType').addEventListener('change', handleExceptionTypeChange);
+            
+            // Set default date to today
+            document.getElementById('exceptionDate').value = new Date().toISOString().split('T')[0];
             
             // Update session duration every second
             setInterval(() => {
@@ -1024,22 +1695,26 @@ Task Details:
                 }
             }, 5 * 60 * 1000);
             
-            // Handle page unload to record logout time
-            window.addEventListener('beforeunload', async function() {
-                // Only set offline if worker is properly authenticated, loaded, and page is fully initialized
-                const isAuthenticated = localStorage.getItem('workerAuthenticated');
-                if (isAuthenticated === 'true' && currentWorker && currentWorker.uid && pageFullyLoaded) {
-                    try {
-                        console.log('Setting worker offline due to page unload');
-                        await window.updateDoc(window.doc(window.db, "workers", currentWorker.uid), {
-                            lastLogout: window.serverTimestamp(),
-                            isOnline: false
-                        });
-                    } catch (error) {
-                        console.error('Error recording logout time:', error);
-                    }
-                }
-            });
+                         // Handle page unload to record logout time
+             window.addEventListener('beforeunload', async function() {
+                 // Only set offline if worker is properly authenticated, loaded, and page is fully initialized
+                 const isAuthenticated = localStorage.getItem('workerAuthenticated');
+                 if (isAuthenticated === 'true' && currentWorker && currentWorker.uid && pageFullyLoaded) {
+                     try {
+                         console.log('Setting worker offline due to page unload');
+                         
+                         // End work session
+                         await endWorkSession();
+                         
+                         await window.updateDoc(window.doc(window.db, "workers", currentWorker.uid), {
+                             lastLogout: window.serverTimestamp(),
+                             isOnline: false
+                         });
+                     } catch (error) {
+                         console.error('Error recording logout time:', error);
+                     }
+                 }
+             });
         });
     </script>
 </body>

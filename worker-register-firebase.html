@@ -334,6 +334,11 @@
                 </select>
             </div>
 
+            <div class="form-group" id="customRoleGroup" style="display: none;">
+                <label for="customRole" class="form-label">Custom Role *</label>
+                <input type="text" id="customRole" class="form-input" placeholder="Please specify your role">
+            </div>
+
             <div class="form-group">
                 <label for="experience" class="form-label">Years of Experience *</label>
                 <select id="experience" class="form-select" required>
@@ -344,6 +349,62 @@
                     <option value="5-10">5-10 years</option>
                     <option value="10+">10+ years</option>
                 </select>
+            </div>
+
+            <div class="form-group">
+                <label for="department" class="form-label">Department *</label>
+                <select id="department" class="form-select" required>
+                    <option value="">Select your department</option>
+                    <option value="development">Development</option>
+                    <option value="design">Design</option>
+                    <option value="marketing">Marketing</option>
+                    <option value="management">Management</option>
+                    <option value="general">General</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="employmentType" class="form-label">Work Type *</label>
+                <select id="employmentType" class="form-select" required>
+                    <option value="">Select work type</option>
+                    <option value="full-time">Full-time</option>
+                    <option value="part-time">Part-time</option>
+                    <option value="remotely">Remotely</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="expectedSalary" class="form-label">Expected Monthly Salary (EGP) *</label>
+                <input type="number" id="expectedSalary" class="form-input" min="0" step="0.01" placeholder="e.g., 5000" required>
+                <div class="form-help" style="font-size: 0.8rem; color: #888; margin-top: 5px;">Enter your expected monthly salary in EGP</div>
+            </div>
+
+            <div class="form-group">
+                <label for="government" class="form-label">Government *</label>
+                <input type="text" id="government" class="form-input" placeholder="e.g., Cairo, Alexandria, Giza" required>
+            </div>
+
+            <div class="form-group">
+                <label for="city" class="form-label">City *</label>
+                <input type="text" id="city" class="form-input" placeholder="e.g., Maadi, Heliopolis, Zamalek" required>
+            </div>
+
+            <div class="form-group">
+                <label for="skills" class="form-label">Skills (comma-separated)</label>
+                <input type="text" id="skills" class="form-input" placeholder="JavaScript, React, Node.js, Python">
+                <div class="form-help" style="font-size: 0.8rem; color: #888; margin-top: 5px;">List your key skills separated by commas</div>
+            </div>
+
+            <div class="form-group">
+                <label for="portfolioLink" class="form-label">Portfolio Link</label>
+                <input type="url" id="portfolioLink" class="form-input" placeholder="https://your-portfolio.com">
+                <div class="form-help" style="font-size: 0.8rem; color: #888; margin-top: 5px;">Optional - Link to your portfolio or work samples</div>
+            </div>
+
+            <div class="form-group">
+                <label for="netspend" class="form-label">Time to Leave Current Job</label>
+                <input type="text" id="netspend" class="form-input" placeholder="e.g., 2 weeks, 1 month, immediately">
+                <div class="form-help" style="font-size: 0.8rem; color: #888; margin-top: 5px;">When can you start working with us?</div>
             </div>
 
             <div class="form-group">
@@ -368,7 +429,7 @@
         </div>
 
         <div class="login-link">
-            Already have an account? <a href="worker-login-firebase.html">Login here</a>
+            Already have an account? <a href="index.html">Login here</a>
         </div>
     </div>
 
@@ -456,16 +517,27 @@
                     lastName: formData.lastName,
                     email: formData.email,
                     phone: formData.phone,
-                    role: formData.role,
+                    role: formData.role === 'other' ? formData.customRole : formData.role,
                     experience: formData.experience,
+                    department: formData.department,
+                    employmentType: formData.employmentType,
+                    expectedSalary: formData.expectedSalary,
+                    government: formData.government,
+                    city: formData.city,
+                    portfolioLink: formData.portfolioLink,
+                    netspend: formData.netspend,
+                    skills: formData.skills,
+                    startDate: serverTimestamp(),
                     isActive: true,
                     isWorker: true,
+                    isOnline: false,
                     createdAt: serverTimestamp(),
                     lastLogin: serverTimestamp(),
                     status: 'pending', // pending, approved, rejected
                     tasks: [],
                     completedTasks: 0,
-                    totalTasks: 0
+                    totalTasks: 0,
+                    performanceNotes: []
                 };
 
                 await setDoc(doc(db, "workers", user.uid), workerData);
@@ -525,7 +597,16 @@
                 email: document.getElementById('email').value.trim(),
                 phone: document.getElementById('phone').value.trim(),
                 role: document.getElementById('role').value,
+                customRole: document.getElementById('customRole').value.trim(),
                 experience: document.getElementById('experience').value,
+                department: document.getElementById('department').value,
+                employmentType: document.getElementById('employmentType').value,
+                expectedSalary: parseFloat(document.getElementById('expectedSalary').value) || 0,
+                government: document.getElementById('government').value.trim(),
+                city: document.getElementById('city').value.trim(),
+                portfolioLink: document.getElementById('portfolioLink').value.trim(),
+                netspend: document.getElementById('netspend').value.trim(),
+                skills: document.getElementById('skills').value.trim().split(',').map(s => s.trim()).filter(s => s),
                 password: document.getElementById('password').value,
                 confirmPassword: document.getElementById('confirmPassword').value
             };
@@ -533,8 +614,15 @@
             // Validation
             if (!formData.firstName || !formData.lastName || !formData.email || 
                 !formData.phone || !formData.role || !formData.experience || 
-                !formData.password || !formData.confirmPassword) {
+                !formData.department || !formData.employmentType || !formData.expectedSalary ||
+                !formData.government || !formData.city || !formData.password || !formData.confirmPassword) {
                 showError('Please fill in all required fields.');
+                return;
+            }
+
+            // Validate custom role if "Other" is selected
+            if (formData.role === 'other' && !formData.customRole) {
+                showError('Please specify your custom role.');
                 return;
             }
 
@@ -566,6 +654,21 @@
             if (!this.value) {
                 document.getElementById('passwordStrength').textContent = '';
                 document.getElementById('passwordStrength').className = 'password-strength';
+            }
+        });
+
+        // Handle role selection for custom role field
+        document.getElementById('role').addEventListener('change', function() {
+            const customRoleGroup = document.getElementById('customRoleGroup');
+            const customRoleInput = document.getElementById('customRole');
+            
+            if (this.value === 'other') {
+                customRoleGroup.style.display = 'block';
+                customRoleInput.required = true;
+            } else {
+                customRoleGroup.style.display = 'none';
+                customRoleInput.required = false;
+                customRoleInput.value = '';
             }
         });
     </script>
