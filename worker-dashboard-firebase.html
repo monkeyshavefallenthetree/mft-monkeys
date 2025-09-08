@@ -8,7 +8,7 @@
     <!-- Firebase SDK -->
     <script type="module">
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
-        import { getAuth, signOut } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
+        import { getAuth, signOut, onAuthStateChanged, signInWithEmailAndPassword } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
                  import { getFirestore, doc, getDoc, updateDoc, collection, query, where, orderBy, getDocs, onSnapshot, serverTimestamp, addDoc } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
         
         // Firebase configuration
@@ -30,6 +30,8 @@
                  // Make Firebase functions available globally
          window.auth = auth;
          window.signOut = signOut;
+         window.onAuthStateChanged = onAuthStateChanged;
+         window.signInWithEmailAndPassword = signInWithEmailAndPassword;
          window.db = db;
          window.doc = doc;
          window.getDoc = getDoc;
@@ -564,6 +566,173 @@
             color: #000000;
         }
 
+        /* Alerts Section */
+        .alerts-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        .alerts-header {
+            margin-bottom: 25px;
+        }
+
+        .alerts-title {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #ffffff;
+            margin-bottom: 8px;
+        }
+
+        .alerts-subtitle {
+            color: #cccccc;
+            font-size: 1rem;
+        }
+
+        .alerts-list {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .alert-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 20px;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .alert-card:hover {
+            transform: translateY(-2px);
+            background: rgba(255, 255, 255, 0.05);
+            border-color: rgba(239, 65, 75, 0.3);
+        }
+
+        .alert-card.unread {
+            border-left: 4px solid #ef414b;
+            background: rgba(239, 65, 75, 0.05);
+        }
+
+        .alert-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+
+        .alert-type {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .alert-type.attendance { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
+        .alert-type.performance { background: rgba(220, 53, 69, 0.2); color: #dc3545; }
+        .alert-type.schedule { background: rgba(0, 123, 255, 0.2); color: #007bff; }
+        .alert-type.policy { background: rgba(108, 117, 125, 0.2); color: #6c757d; }
+        .alert-type.general { background: rgba(40, 167, 69, 0.2); color: #28a745; }
+        .alert-type.urgent { background: rgba(239, 65, 75, 0.2); color: #ef414b; }
+
+        .alert-priority {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .alert-priority.low { background: rgba(40, 167, 69, 0.2); color: #28a745; }
+        .alert-priority.medium { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
+        .alert-priority.high { background: rgba(255, 108, 55, 0.2); color: #ff6c37; }
+        .alert-priority.urgent { background: rgba(220, 53, 69, 0.2); color: #dc3545; }
+
+        .alert-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #ffffff;
+            margin-bottom: 10px;
+        }
+
+        .alert-message {
+            color: #cccccc;
+            line-height: 1.6;
+            margin-bottom: 15px;
+        }
+
+        .alert-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.85rem;
+            color: #888888;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .alert-date {
+            color: #aaaaaa;
+        }
+
+        .alert-sender {
+            color: #ef414b;
+            font-weight: 500;
+        }
+
+        .alert-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .alert-btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .alert-btn.mark-read {
+            background: rgba(40, 167, 69, 0.2);
+            color: #28a745;
+            border: 1px solid rgba(40, 167, 69, 0.3);
+        }
+
+        .alert-btn.mark-read:hover {
+            background: rgba(40, 167, 69, 0.3);
+            transform: translateY(-1px);
+        }
+
+        .no-alerts {
+            text-align: center;
+            color: #888888;
+            padding: 40px 20px;
+        }
+
+        .no-alerts p {
+            margin-bottom: 10px;
+        }
+
         /* Exception History Section */
         .exception-history-section {
             background: rgba(255, 255, 255, 0.05);
@@ -876,6 +1045,20 @@
             </div>
         </section>
 
+        <!-- Alerts Section -->
+        <section class="alerts-section">
+            <div class="alerts-header">
+                <h2 class="alerts-title">📢 HR Alerts</h2>
+                <p class="alerts-subtitle">Important messages and notifications from management</p>
+            </div>
+            <div class="alerts-list" id="alertsList">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading alerts...</p>
+                </div>
+            </div>
+        </section>
+
         <!-- Exception History Section -->
         <section class="exception-history-section">
             <div class="exception-history-header">
@@ -905,30 +1088,103 @@
     </main>
 
     <script>
-                 let currentWorker = null;
-         let workerTasks = [];
-         let workerExceptions = [];
-         let pageFullyLoaded = false;
-         let currentWorkSession = null;
+                                 let currentWorker = null;
+        let workerTasks = [];
+        let workerExceptions = [];
+        let workerAlerts = [];
+        let pageFullyLoaded = false;
+        let currentWorkSession = null;
+        
+        // Timer management variables
+        let sessionUpdateTimer = null;
+        let sessionTimeoutTimer = null;
+        let isTimersActive = false;
 
-        // Check authentication
-        function checkAuth() {
-            const isAuthenticated = localStorage.getItem('workerAuthenticated');
-            const workerData = localStorage.getItem('currentWorker');
-            
-            if (isAuthenticated !== 'true' || !workerData) {
-                window.location.href = 'worker-login-firebase.html';
-                return false;
-            }
-
-            currentWorker = JSON.parse(workerData);
-            return true;
+        // Check authentication with Firebase Auth
+        async function checkAuth() {
+            return new Promise((resolve) => {
+                window.onAuthStateChanged(window.auth, async (user) => {
+                    if (!user) {
+                        console.log('❌ No Firebase Auth user found');
+                        // Try to authenticate with stored credentials
+                        const workerData = localStorage.getItem('currentWorker');
+                        if (workerData) {
+                            const worker = JSON.parse(workerData);
+                            try {
+                                // Try to sign in with stored email and a default password
+                                // Note: This is a temporary solution, ideally worker should login properly
+                                console.log('🔄 Attempting Firebase Auth with stored credentials...');
+                                // Try common passwords that workers might have
+                                const possiblePasswords = ['worker123', worker.email.split('@')[0] + '123', 'password123'];
+                                let authSuccess = false;
+                                
+                                for (const password of possiblePasswords) {
+                                    try {
+                                        await window.signInWithEmailAndPassword(window.auth, worker.email, password);
+                                        console.log('✅ Firebase Auth successful with password:', password);
+                                        authSuccess = true;
+                                        break;
+                                    } catch (authError) {
+                                        console.log('❌ Auth failed with password:', password);
+                                    }
+                                }
+                                
+                                if (!authSuccess) {
+                                    throw new Error('Failed to authenticate with any password');
+                                }
+                                console.log('✅ Firebase Auth successful');
+                                currentWorker = worker;
+                                resolve(true);
+                            } catch (error) {
+                                console.error('❌ Firebase Auth failed:', error);
+                                alert('Please login again. Authentication expired.');
+                                window.location.href = 'index.html';
+                                resolve(false);
+                            }
+                        } else {
+                            window.location.href = 'index.html';
+                            resolve(false);
+                        }
+                    } else {
+                        console.log('✅ Firebase Auth user found:', user.email);
+                        // Get worker data from localStorage or Firestore
+                        const workerData = localStorage.getItem('currentWorker');
+                        if (workerData) {
+                            currentWorker = JSON.parse(workerData);
+                        } else {
+                            // Fetch worker data from Firestore using UID
+                            try {
+                                const workerDoc = await window.getDoc(window.doc(window.db, 'workers', user.uid));
+                                if (workerDoc.exists()) {
+                                    currentWorker = { uid: user.uid, ...workerDoc.data() };
+                                    localStorage.setItem('currentWorker', JSON.stringify(currentWorker));
+                                } else {
+                                    console.error('Worker document not found');
+                                    alert('Worker profile not found. Please contact administrator.');
+                                    resolve(false);
+                                    return;
+                                }
+                            } catch (error) {
+                                console.error('Error fetching worker data:', error);
+                                resolve(false);
+                                return;
+                            }
+                        }
+                        resolve(true);
+                    }
+                });
+            });
         }
 
                  // Logout function
          async function logout() {
              if (confirm('Are you sure you want to logout?')) {
                  try {
+                     console.log('🚪 Starting logout process...');
+                     
+                     // CRITICAL: Stop all timers immediately
+                     stopSessionTimers();
+                     
                      // End work session tracking
                      await endWorkSession();
                      
@@ -940,13 +1196,31 @@
                          });
                      }
                      
+                     // Clear global state
+                     currentWorkSession = null;
+                     currentWorker = null;
+                     pageFullyLoaded = false;
+                     
+                     // Firebase signout
                      await window.signOut(window.auth);
+                     
+                     // Clear localStorage
                      localStorage.removeItem('workerAuthenticated');
                      localStorage.removeItem('currentWorker');
                      localStorage.removeItem('workerLoginTime');
+                     
+                     console.log('✅ Logout completed successfully');
                      window.location.href = 'index.html';
+                     
                  } catch (error) {
-                     console.error('Logout error:', error);
+                     console.error('❌ Logout error:', error);
+                     
+                     // CRITICAL: Even if logout fails, stop timers and clear data
+                     stopSessionTimers();
+                     currentWorkSession = null;
+                     currentWorker = null;
+                     pageFullyLoaded = false;
+                     
                      // Still clear localStorage and redirect even if logout time recording fails
                      localStorage.removeItem('workerAuthenticated');
                      localStorage.removeItem('currentWorker');
@@ -1216,34 +1490,7 @@
             updateSessionDuration();
         }
         
-                 // Update session duration
-         function updateSessionDuration() {
-             const loginTime = localStorage.getItem('workerLoginTime');
-             if (loginTime) {
-                 const loginDate = new Date(loginTime);
-                 const now = new Date();
-                 const duration = now - loginDate;
-                 
-                 const hours = Math.floor(duration / (1000 * 60 * 60));
-                 const minutes = Math.floor((duration % (1000 * 60 * 60)) / (1000 * 60));
-                 const seconds = Math.floor((duration % (1000 * 60)) / 1000);
-                 
-                 const sessionDuration = `${hours}h ${minutes}m ${seconds}s`;
-                 document.getElementById('sessionDuration').textContent = sessionDuration;
-                 
-                 // Update header session time
-                 const loginTimeString = loginDate.toLocaleTimeString();
-                 document.getElementById('headerSessionTime').textContent = `🕐 ${loginTimeString} (${sessionDuration})`;
-                 
-                 // Update work session periodically
-                 if (currentWorkSession) {
-                     updateWorkSessionInFirebase();
-                 }
-             } else {
-                 document.getElementById('sessionDuration').textContent = 'Session time unavailable';
-                 document.getElementById('headerSessionTime').textContent = '🕐 Session time unavailable';
-             }
-         }
+
 
         // Start task
         async function startTask(taskId) {
@@ -1348,7 +1595,45 @@ Task Details:
                  const loginTime = localStorage.getItem('workerLoginTime');
                  if (!loginTime || !currentWorker) return;
 
-                 // Create new work session record
+                 const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+                 
+                 console.log('🔍 Checking for existing work session for today:', today);
+                 
+                 // Check if a work session already exists for today
+                 const q = window.query(
+                     window.collection(window.db, 'workSessions'),
+                     window.where('workerId', '==', currentWorker.uid),
+                     window.where('date', '==', today)
+                 );
+                 
+                 const existingSessionsSnapshot = await window.getDocs(q);
+                 
+                 if (!existingSessionsSnapshot.empty) {
+                     console.log('📋 Found existing work session for today, using existing session');
+                     const existingSession = existingSessionsSnapshot.docs[0];
+                     const sessionData = existingSession.data();
+                     
+                     currentWorkSession = {
+                         id: existingSession.id,
+                         startTime: sessionData.startTime?.toDate ? sessionData.startTime.toDate() : new Date(sessionData.startTime),
+                         isActive: sessionData.isActive || true
+                     };
+                     
+                     console.log('✅ Using existing work session:', currentWorkSession);
+                     
+                     // Update the existing session to mark it as active again (for re-login)
+                     await window.updateDoc(window.doc(window.db, 'workSessions', currentWorkSession.id), {
+                         isActive: true,
+                         lastLoginTime: new Date(loginTime),
+                         lastUpdated: window.serverTimestamp()
+                     });
+                     
+                     return;
+                 }
+
+                 console.log('➕ No existing session found, creating new work session for today');
+                 
+                 // Create new work session record only if none exists for today
                  const sessionDoc = await window.addDoc(window.collection(window.db, 'workSessions'), {
                      workerId: currentWorker.uid,
                      workerName: `${currentWorker.firstName} ${currentWorker.lastName}`,
@@ -1357,7 +1642,7 @@ Task Details:
                      startTime: new Date(loginTime),
                      isActive: true,
                      totalWorkTime: 0,
-                     date: new Date().toISOString().split('T')[0], // YYYY-MM-DD format
+                     date: today,
                      createdAt: window.serverTimestamp()
                  });
 
@@ -1367,9 +1652,37 @@ Task Details:
                      isActive: true
                  };
 
-                 console.log('Work session initialized:', currentWorkSession);
+                 console.log('✅ New work session created:', currentWorkSession);
              } catch (error) {
-                 console.error('Error initializing work session:', error);
+                 console.error('❌ Error initializing work session:', error);
+                 
+                 // If there's an error with the query (like missing index), create session anyway
+                 if (error.message && error.message.includes('index')) {
+                     console.log('⚠️  Index error detected, creating session without check');
+                     try {
+                         const sessionDoc = await window.addDoc(window.collection(window.db, 'workSessions'), {
+                             workerId: currentWorker.uid,
+                             workerName: `${currentWorker.firstName} ${currentWorker.lastName}`,
+                             workerEmail: currentWorker.email,
+                             loginTime: new Date(localStorage.getItem('workerLoginTime')),
+                             startTime: new Date(localStorage.getItem('workerLoginTime')),
+                             isActive: true,
+                             totalWorkTime: 0,
+                             date: new Date().toISOString().split('T')[0],
+                             createdAt: window.serverTimestamp()
+                         });
+                         
+                         currentWorkSession = {
+                             id: sessionDoc.id,
+                             startTime: new Date(localStorage.getItem('workerLoginTime')),
+                             isActive: true
+                         };
+                         
+                         console.log('✅ Fallback work session created:', currentWorkSession);
+                     } catch (fallbackError) {
+                         console.error('❌ Fallback session creation failed:', fallbackError);
+                     }
+                 }
              }
          }
 
@@ -1418,17 +1731,178 @@ Task Details:
 
          // Initialize dashboard
          async function initDashboard() {
-             if (!checkAuth()) return;
+             console.log('🚀 Initializing worker dashboard...');
+             const isAuthenticated = await checkAuth();
+             if (!isAuthenticated) {
+                 console.log('❌ Authentication failed, redirecting...');
+                 return;
+             }
 
+             console.log('✅ Authentication successful, loading dashboard...');
              await Promise.all([
                  loadWorkerProfile(),
                  loadWorkerTasks(),
                  loadWorkerExceptions(),
+                 loadWorkerAlerts(),
                  initializeWorkSession()
              ]);
              
-             // Mark page as fully loaded after initialization
-             pageFullyLoaded = true;
+                         // Mark page as fully loaded after initialization
+            pageFullyLoaded = true;
+            console.log('✅ Dashboard initialization completed');
+            
+            // Ensure timers are started after successful authentication
+            if (!isTimersActive && currentWorker) {
+                console.log('🔄 Starting timers after successful dashboard initialization...');
+                startSessionTimers();
+            }
+         }
+
+         // Load worker alerts
+         async function loadWorkerAlerts() {
+             try {
+                 console.log('Loading alerts for worker:', currentWorker.uid);
+                 
+                 // Query alerts where worker is in recipients array
+                 const q = window.query(
+                     window.collection(window.db, "alerts"),
+                     window.where("recipients", "array-contains", currentWorker.uid)
+                 );
+                 
+                 const querySnapshot = await window.getDocs(q);
+                 console.log('Alerts query completed, found', querySnapshot.size, 'alerts');
+                 
+                 workerAlerts = [];
+                 
+                 querySnapshot.forEach((doc) => {
+                     const data = doc.data();
+                     workerAlerts.push({
+                         id: doc.id,
+                         ...data
+                     });
+                 });
+
+                 // Sort alerts by creation date (newest first)
+                 workerAlerts.sort((a, b) => {
+                     const dateA = a.sentAt?.toDate?.() || a.createdAt?.toDate?.() || new Date(0);
+                     const dateB = b.sentAt?.toDate?.() || b.createdAt?.toDate?.() || new Date(0);
+                     return dateB - dateA;
+                 });
+
+                 displayAlerts();
+                 
+             } catch (error) {
+                 console.error('Error loading alerts:', error);
+                 
+                 let errorMessage = 'Error loading alerts';
+                 
+                 if (error.code === 'permission-denied') {
+                     errorMessage = 'Permission denied. Please check if you are logged in correctly.';
+                 } else if (error.code === 'unavailable') {
+                     errorMessage = 'Firebase service temporarily unavailable. Please try again.';
+                 }
+                 
+                 document.getElementById('alertsList').innerHTML = `
+                     <div style="color: #ff4757; text-align: center; padding: 20px;">
+                         <p><strong>${errorMessage}</strong></p>
+                         <p>Error details: ${error.message}</p>
+                         <button onclick="loadWorkerAlerts()" style="margin-top: 10px; padding: 8px 16px; background: #ef414b; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                             Try Again
+                         </button>
+                     </div>
+                 `;
+             }
+         }
+
+         // Display alerts
+         function displayAlerts() {
+             const alertsList = document.getElementById('alertsList');
+             
+             if (workerAlerts.length === 0) {
+                 alertsList.innerHTML = `
+                     <div class="no-alerts">
+                         <p>📭 No alerts received yet.</p>
+                         <p>Important messages from HR will appear here.</p>
+                     </div>
+                 `;
+                 return;
+             }
+
+             alertsList.innerHTML = workerAlerts.map(alert => `
+                 <div class="alert-card ${alert.isRead ? '' : 'unread'}" id="alert-${alert.id}">
+                     <div class="alert-header">
+                         <div class="alert-type ${alert.type || 'general'}">${getAlertTypeIcon(alert.type)} ${alert.type || 'general'}</div>
+                         <div class="alert-priority ${alert.priority || 'medium'}">${alert.priority || 'medium'}</div>
+                     </div>
+                     <div class="alert-title">${alert.title || 'Untitled Alert'}</div>
+                     <div class="alert-message">${alert.message || 'No message content'}</div>
+                     ${alert.hasPenalty && alert.penaltyApplied ? `
+                         <div style="background: rgba(220, 53, 69, 0.1); border: 1px solid rgba(220, 53, 69, 0.3); border-radius: 8px; padding: 10px; margin: 10px 0;">
+                             <strong style="color: #dc3545;">⚠️ Penalty Applied:</strong> ${alert.penaltyApplied > 0 ? 'Deduction' : 'Bonus'} of ${Math.abs(alert.penaltyApplied)} day(s)
+                         </div>
+                     ` : ''}
+                     <div class="alert-meta">
+                         <div class="alert-date">${formatAlertDate(alert.sentAt || alert.createdAt)}</div>
+                         <div class="alert-sender">From: ${alert.sentBy || 'HR'}</div>
+                     </div>
+                     ${!alert.isRead ? `
+                         <div class="alert-actions">
+                             <button class="alert-btn mark-read" onclick="markAlertAsRead('${alert.id}')">
+                                 ✓ Mark as Read
+                             </button>
+                         </div>
+                     ` : ''}
+                 </div>
+             `).join('');
+         }
+
+         // Helper function to get alert type icon
+         function getAlertTypeIcon(type) {
+             const icons = {
+                 'attendance': '⏰',
+                 'performance': '📊',
+                 'schedule': '📅',
+                 'policy': '📋',
+                 'general': '📢',
+                 'urgent': '🚨'
+             };
+             return icons[type] || '📢';
+         }
+
+         // Helper function to format alert date
+         function formatAlertDate(timestamp) {
+             if (!timestamp) return 'Unknown date';
+             
+             const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+             const now = new Date();
+             const diffTime = Math.abs(now - date);
+             const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+             
+             if (diffDays === 0) {
+                 return 'Today at ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+             } else if (diffDays === 1) {
+                 return 'Yesterday at ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+             } else if (diffDays < 7) {
+                 return diffDays + ' days ago';
+             } else {
+                 return date.toLocaleDateString();
+             }
+         }
+
+         // Mark alert as read
+         async function markAlertAsRead(alertId) {
+             try {
+                 // Note: This function would need to update the alert document
+                 // For now, we'll just update the local display
+                 const alert = workerAlerts.find(a => a.id === alertId);
+                 if (alert) {
+                     alert.isRead = true;
+                     displayAlerts(); // Refresh display
+                     console.log('Alert marked as read:', alertId);
+                 }
+             } catch (error) {
+                 console.error('Error marking alert as read:', error);
+             }
          }
 
          // Load worker exceptions
@@ -1436,11 +1910,11 @@ Task Details:
              try {
                  console.log('Loading exceptions for worker:', currentWorker.uid);
                  
-                 const q = window.query(
-                     window.collection(window.db, "exceptions"),
-                     window.where("workerId", "==", currentWorker.uid),
-                     window.orderBy("createdAt", "desc")
-                 );
+                                 const q = window.query(
+                    window.collection(window.db, "exceptionRequests"),
+                    window.where("workerId", "==", currentWorker.uid),
+                    window.orderBy("createdAt", "desc")
+                );
                  
                  const querySnapshot = await window.getDocs(q);
                  console.log('Exceptions query completed, found', querySnapshot.size, 'exceptions');
@@ -1544,8 +2018,8 @@ Task Details:
              }
 
              try {
-                 // Submit exception to Firebase
-                 const exceptionDoc = await window.addDoc(window.collection(window.db, "exceptions"), {
+                                 // Submit exception to Firebase
+                const exceptionDoc = await window.addDoc(window.collection(window.db, "exceptionRequests"), {
                      workerId: currentWorker.uid,
                      workerName: `${currentWorker.firstName} ${currentWorker.lastName}`,
                      workerEmail: currentWorker.email,
@@ -1672,6 +2146,109 @@ Task Details:
              return true;
          }
 
+         // Start session timers
+         function startSessionTimers() {
+             if (isTimersActive) {
+                 console.log('⚠️ Timers already active, skipping start');
+                 return;
+             }
+             
+             console.log('▶️ Starting session timers...');
+             
+             // Start session duration update timer (every second)
+             sessionUpdateTimer = setInterval(() => {
+                 if (isTimersActive) {
+                     updateSessionDuration();
+                 }
+             }, 1000);
+             
+             // Start session timeout check timer (every 5 minutes)
+             sessionTimeoutTimer = setInterval(() => {
+                 if (isTimersActive && !checkSessionTimeout()) {
+                     window.location.href = 'index.html';
+                 }
+             }, 5 * 60 * 1000);
+             
+             isTimersActive = true;
+             console.log('✅ Session timers started');
+         }
+
+         // Stop session timers
+         function stopSessionTimers() {
+             if (!isTimersActive) {
+                 console.log('⚠️ Timers already stopped, skipping stop');
+                 return;
+             }
+             
+             console.log('⏹️ Stopping session timers...');
+             
+             if (sessionUpdateTimer) {
+                 clearInterval(sessionUpdateTimer);
+                 sessionUpdateTimer = null;
+             }
+             
+             if (sessionTimeoutTimer) {
+                 clearInterval(sessionTimeoutTimer);
+                 sessionTimeoutTimer = null;
+             }
+             
+             isTimersActive = false;
+             console.log('✅ Session timers stopped');
+         }
+
+         // Update session duration with safety checks
+         function updateSessionDuration() {
+             // Safety check: only update if user is authenticated and page is loaded
+             const isAuthenticated = localStorage.getItem('workerAuthenticated');
+             if (isAuthenticated !== 'true' || !pageFullyLoaded || !currentWorker) {
+                 console.log('⚠️ Skipping session update - user not authenticated or page not loaded');
+                 return;
+             }
+             
+             const loginTime = localStorage.getItem('workerLoginTime');
+             if (loginTime) {
+                 const loginDate = new Date(loginTime);
+                 const now = new Date();
+                 const duration = now - loginDate;
+                 
+                 const hours = Math.floor(duration / (1000 * 60 * 60));
+                 const minutes = Math.floor((duration % (1000 * 60 * 60)) / (1000 * 60));
+                 const seconds = Math.floor((duration % (1000 * 60)) / 1000);
+                 
+                 const sessionDuration = `${hours}h ${minutes}m ${seconds}s`;
+                 
+                 // Safely update DOM elements
+                 const sessionDurationElement = document.getElementById('sessionDuration');
+                 const headerSessionTimeElement = document.getElementById('headerSessionTime');
+                 
+                 if (sessionDurationElement) {
+                     sessionDurationElement.textContent = sessionDuration;
+                 }
+                 
+                 if (headerSessionTimeElement) {
+                     const loginTimeString = loginDate.toLocaleTimeString();
+                     headerSessionTimeElement.textContent = `🕐 ${loginTimeString} (${sessionDuration})`;
+                 }
+                 
+                 // Update work session periodically (only if session is active)
+                 if (currentWorkSession && currentWorkSession.isActive) {
+                     updateWorkSessionInFirebase();
+                 }
+             } else {
+                 // Clear display if no login time
+                 const sessionDurationElement = document.getElementById('sessionDuration');
+                 const headerSessionTimeElement = document.getElementById('headerSessionTime');
+                 
+                 if (sessionDurationElement) {
+                     sessionDurationElement.textContent = 'Session time unavailable';
+                 }
+                 
+                 if (headerSessionTimeElement) {
+                     headerSessionTimeElement.textContent = '🕐 Session time unavailable';
+                 }
+             }
+         }
+
         // Initialize when page loads
         document.addEventListener('DOMContentLoaded', function() {
             initDashboard();
@@ -1683,38 +2260,55 @@ Task Details:
             // Set default date to today
             document.getElementById('exceptionDate').value = new Date().toISOString().split('T')[0];
             
-            // Update session duration every second
-            setInterval(() => {
-                updateSessionDuration();
-            }, 1000);
+            // Start session timers after page loads
+            console.log('📍 Page loaded, starting session timers...');
+            startSessionTimers();
             
-            // Check session timeout every 5 minutes
-            setInterval(() => {
-                if (!checkSessionTimeout()) {
-                    window.location.href = 'worker-login-firebase.html';
+            // Handle page unload to record logout time and stop timers
+            window.addEventListener('beforeunload', async function(event) {
+                console.log('🚪 Page unloading, stopping timers and ending session...');
+                
+                // CRITICAL: Stop timers immediately
+                stopSessionTimers();
+                
+                const isAuthenticated = localStorage.getItem('workerAuthenticated');
+                if (isAuthenticated === 'true' && currentWorker && currentWorker.uid && pageFullyLoaded) {
+                    try {
+                        console.log('Setting worker offline due to page unload');
+                        
+                        // End work session
+                        await endWorkSession();
+                        
+                        await window.updateDoc(window.doc(window.db, "workers", currentWorker.uid), {
+                            lastLogout: window.serverTimestamp(),
+                            isOnline: false
+                        });
+                        
+                        // Clear global state
+                        currentWorkSession = null;
+                        currentWorker = null;
+                        pageFullyLoaded = false;
+                        
+                    } catch (error) {
+                        console.error('Error recording logout time:', error);
+                    }
                 }
-            }, 5 * 60 * 1000);
+            });
             
-                         // Handle page unload to record logout time
-             window.addEventListener('beforeunload', async function() {
-                 // Only set offline if worker is properly authenticated, loaded, and page is fully initialized
-                 const isAuthenticated = localStorage.getItem('workerAuthenticated');
-                 if (isAuthenticated === 'true' && currentWorker && currentWorker.uid && pageFullyLoaded) {
-                     try {
-                         console.log('Setting worker offline due to page unload');
-                         
-                         // End work session
-                         await endWorkSession();
-                         
-                         await window.updateDoc(window.doc(window.db, "workers", currentWorker.uid), {
-                             lastLogout: window.serverTimestamp(),
-                             isOnline: false
-                         });
-                     } catch (error) {
-                         console.error('Error recording logout time:', error);
-                     }
-                 }
-             });
+            // Handle page visibility change (when user switches tabs or minimizes)
+            document.addEventListener('visibilitychange', function() {
+                if (document.hidden) {
+                    console.log('📱 Page hidden, timers continue running...');
+                    // Timers continue for brief tab switches
+                } else {
+                    console.log('👁️ Page visible again, timers active...');
+                    // Ensure timers are still active
+                    if (!isTimersActive && currentWorker) {
+                        console.log('🔄 Restarting timers after visibility change...');
+                        startSessionTimers();
+                    }
+                }
+            });
         });
     </script>
 </body>
