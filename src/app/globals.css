@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --mft-primary: #FF5500;
+    --mft-bg: #000000;
+    --mft-surface: #0a0a0a;
+    --mft-border: #333333;
+    --mft-text: #ffffff;
+    --mft-muted: #888888;
+  }
+
+  html {
+    background: var(--mft-bg);
+    color: var(--mft-text);
+  }
+
+  body {
+    min-height: 100dvh;
+    background: var(--mft-bg);
+    color: var(--mft-text);
+    font-family: var(--font-plex-mono), monospace;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-oswald), sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+
+  * {
+    box-sizing: border-box;
+    /* Brutalist: Disable default rounded corners universally if possible, but let's just make it stark */
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer utilities {
+  .focus-ring {
+    @apply outline-none ring-2 ring-[var(--mft-primary)] ring-offset-2 ring-offset-[#000000];
+  }
+
+  .brutal-card {
+    @apply bg-[var(--mft-surface)] border border-[var(--mft-border)] rounded-none shadow-[4px_4px_0px_0px_#FF5500];
+  }
+  
+  .brutal-card-hover {
+    @apply hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[2px_2px_0px_0px_#FF5500] transition-all duration-75;
+  }
+
+  .brutal-input {
+    @apply w-full bg-[#000000] border border-[var(--mft-border)] rounded-none px-4 py-3 text-white focus:border-[var(--mft-primary)] outline-none transition-colors duration-75;
+  }
+
+  .brutal-btn {
+    @apply px-6 py-3 bg-[var(--mft-primary)] text-black font-bold uppercase tracking-wider rounded-none border border-transparent hover:bg-white hover:text-black hover:border-white transition-colors duration-75 active:scale-[0.98];
+  }
+
+  .brutal-btn-outline {
+    @apply px-6 py-3 bg-transparent text-white font-bold uppercase tracking-wider rounded-none border border-[var(--mft-border)] hover:bg-white hover:text-black hover:border-white transition-colors duration-75 active:scale-[0.98];
+  }
+}
+
+/* Auth pages — Terminal/Industrial aesthetic */
+.worker-auth-root {
+  background: var(--mft-bg);
+  background-image: linear-gradient(rgba(255, 85, 0, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 85, 0, 0.05) 1px, transparent 1px);
+  background-size: 64px 64px;
+}
+
+@keyframes brutal-shimmer {
+  0% { opacity: 1; }
+  50% { opacity: 0.5; }
+  100% { opacity: 1; }
+}
+
+.worker-btn-loading {
+  background-color: var(--mft-primary);
+  animation: brutal-shimmer 1s steps(2, end) infinite;
+}

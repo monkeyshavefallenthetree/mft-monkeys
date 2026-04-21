@@ -1,0 +1,3026 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Worker Dashboard - Monkeys Have Fallen The Tree</title>
+    
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+        import { getAuth, signOut, onAuthStateChanged, signInWithEmailAndPassword } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
+                 import { getFirestore, doc, getDoc, updateDoc, collection, query, where, orderBy, getDocs, onSnapshot, serverTimestamp, addDoc } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js';
+        
+        // Firebase configuration
+        const firebaseConfig = {
+            apiKey: "AIzaSyAszc76bGqYvAOSqZ5ZuxWDQNqdw8We2uc",
+            authDomain: "monkeys-have-fallen-tree.firebaseapp.com",
+            projectId: "monkeys-have-fallen-tree",
+            storageBucket: "monkeys-have-fallen-tree.firebasestorage.app",
+            messagingSenderId: "585775814693",
+            appId: "1:585775814693:web:fdab2f5af6a0a1e39687cc",
+            measurementId: "G-YTQ38QQFEL"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+                 // Make Firebase functions available globally
+         window.auth = auth;
+         window.signOut = signOut;
+         window.onAuthStateChanged = onAuthStateChanged;
+         window.signInWithEmailAndPassword = signInWithEmailAndPassword;
+         window.db = db;
+         window.doc = doc;
+         window.getDoc = getDoc;
+         window.updateDoc = updateDoc;
+         window.collection = collection;
+         window.query = query;
+         window.where = where;
+         window.orderBy = orderBy;
+         window.getDocs = getDocs;
+         window.onSnapshot = onSnapshot;
+         window.serverTimestamp = serverTimestamp;
+         window.addDoc = addDoc;
+    </script>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 100%);
+            color: #ffffff;
+            min-height: 100vh;
+        }
+
+        /* Header */
+        .dashboard-header {
+            background: rgba(20, 20, 20, 0.95);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(239, 65, 75, 0.3);
+            padding: 20px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+
+        .dashboard-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #ef414b;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .dashboard-title::before {
+            content: '👷';
+            font-size: 1.2rem;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .logout-btn {
+            background: transparent;
+            color: #cccccc;
+            border: 1px solid #cccccc;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .logout-btn:hover {
+            background: #cccccc;
+            color: #000000;
+            transform: translateY(-1px);
+        }
+
+        .home-btn {
+            background: #ef414b;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .home-btn:hover {
+            background: #d63641;
+            transform: translateY(-1px);
+        }
+
+        .session-info {
+            display: flex;
+            align-items: center;
+            margin-right: 15px;
+        }
+
+        .session-time {
+            color: #cccccc;
+            font-size: 0.9rem;
+            font-weight: 500;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        /* Main content */
+        .dashboard-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 30px;
+        }
+
+        .welcome-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        .welcome-title {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #ef414b;
+            margin-bottom: 10px;
+        }
+
+        .welcome-subtitle {
+            color: #cccccc;
+            font-size: 1.1rem;
+            margin-bottom: 20px;
+        }
+
+        .worker-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 30px;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            border-color: rgba(239, 65, 75, 0.3);
+        }
+
+        .stat-number {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #ef414b;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            color: #cccccc;
+            font-size: 0.9rem;
+        }
+
+        /* Profile Section */
+        .profile-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #ef414b;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-title::before {
+            content: '👤';
+            font-size: 1.2rem;
+        }
+
+        .profile-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+
+        .profile-item {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 15px;
+        }
+
+        .profile-label {
+            color: #888888;
+            font-size: 0.9rem;
+            margin-bottom: 5px;
+        }
+
+        .profile-value {
+            color: #ffffff;
+            font-weight: 600;
+            font-size: 1rem;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .status-pending {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+            border: 1px solid rgba(255, 193, 7, 0.3);
+        }
+
+        .status-approved {
+            background: rgba(40, 167, 69, 0.2);
+            color: #28a745;
+            border: 1px solid rgba(40, 167, 69, 0.3);
+        }
+
+        .status-rejected {
+            background: rgba(220, 53, 69, 0.2);
+            color: #dc3545;
+            border: 1px solid rgba(220, 53, 69, 0.3);
+        }
+
+        /* Tasks Section */
+        .tasks-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        .tasks-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .tasks-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #ef414b;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .tasks-title::before {
+            content: '📋';
+            font-size: 1.2rem;
+        }
+
+        .tasks-list {
+            display: grid;
+            gap: 15px;
+        }
+
+        .task-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 20px;
+            transition: all 0.3s ease;
+        }
+
+        .task-card:hover {
+            border-color: rgba(239, 65, 75, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .task-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .task-title {
+            font-weight: 600;
+            color: #ffffff;
+            font-size: 1.1rem;
+        }
+
+        .task-status {
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .status-assigned {
+            background: rgba(0, 123, 255, 0.2);
+            color: #007bff;
+            border: 1px solid rgba(0, 123, 255, 0.3);
+        }
+
+        .status-in-progress {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+            border: 1px solid rgba(255, 193, 7, 0.3);
+        }
+
+        .status-completed {
+            background: rgba(40, 167, 69, 0.2);
+            color: #28a745;
+            border: 1px solid rgba(40, 167, 69, 0.3);
+        }
+
+        .status-pending-approval {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+            border: 1px solid rgba(255, 193, 7, 0.3);
+        }
+
+        .task-details {
+            color: #cccccc;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            margin-bottom: 15px;
+        }
+
+        .task-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .task-btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+        }
+
+        .btn-start {
+            background: #007bff;
+            color: white;
+        }
+
+        .btn-start:hover {
+            background: #0056b3;
+        }
+
+        .btn-complete {
+            background: #28a745;
+            color: white;
+        }
+
+            .btn-complete:hover {
+            background: #1e7e34;
+        }
+
+        .btn-view {
+            background: transparent;
+            color: #cccccc;
+            border: 1px solid #cccccc;
+        }
+
+        .btn-view:hover {
+            background: #cccccc;
+            color: #000000;
+        }
+
+        /* Project Card Styles */
+        .project-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(239, 65, 75, 0.2);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            transition: all 0.3s ease;
+        }
+
+        .project-card:hover {
+            border-color: rgba(239, 65, 75, 0.4);
+            transform: translateY(-2px);
+        }
+
+        .project-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            cursor: pointer;
+        }
+
+        .project-title-section {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .project-expand-icon {
+            font-size: 1rem;
+            transition: transform 0.3s ease;
+            color: #ef414b;
+        }
+
+        .project-expand-icon.expanded {
+            transform: rotate(90deg);
+        }
+
+        .project-title {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #ef414b;
+        }
+
+        .project-task-count {
+            background: rgba(239, 65, 75, 0.2);
+            color: #ef414b;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .project-info {
+            color: #cccccc;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            margin-bottom: 15px;
+            padding-left: 30px;
+        }
+
+        .project-tasks-section {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            display: none;
+            padding-left: 30px;
+        }
+
+        .project-tasks-section.expanded {
+            display: block;
+        }
+
+        .project-task-item {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 10px;
+        }
+
+        .project-task-item:hover {
+            border-color: rgba(239, 65, 75, 0.3);
+        }
+
+        .no-tasks {
+            text-align: center;
+            color: #888888;
+            padding: 40px;
+            font-style: italic;
+        }
+
+        /* Modal Styles */
+        .modal {
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(5px);
+        }
+
+        .modal-content {
+            position: relative;
+            margin: 50px auto;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .modal-content::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .modal-content::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+
+        .modal-content::-webkit-scrollbar-thumb {
+            background: #ef414b;
+            border-radius: 4px;
+        }
+
+        .close {
+            color: #aaa;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: color 0.3s;
+        }
+
+        .close:hover,
+        .close:focus {
+            color: #ef414b;
+        }
+
+        /* Fix dropdown text color */
+        select option {
+            background: #ffffff;
+            color: #000000;
+        }
+
+        /* Exception Section */
+        .exception-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        .exception-header {
+            margin-bottom: 25px;
+        }
+
+        .exception-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #ef414b;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .exception-title::before {
+            content: '⚠️';
+            font-size: 1.2rem;
+        }
+
+        .exception-subtitle {
+            color: #cccccc;
+            font-size: 1rem;
+        }
+
+        .exception-form-container {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 25px;
+        }
+
+        .exception-form {
+            display: grid;
+            gap: 20px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .form-group label {
+            color: #ffffff;
+            font-weight: 600;
+            font-size: 0.95rem;
+        }
+
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            padding: 12px 15px;
+            color: #ffffff;
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #ef414b;
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .form-group input::placeholder,
+        .form-group textarea::placeholder {
+            color: #888888;
+        }
+
+        .form-actions {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+        }
+
+        .submit-exception-btn {
+            background: #ef414b;
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+            flex: 1;
+        }
+
+        .submit-exception-btn:hover {
+            background: #d63641;
+            transform: translateY(-1px);
+        }
+
+        .clear-form-btn {
+            background: transparent;
+            color: #cccccc;
+            border: 1px solid #cccccc;
+            padding: 12px 25px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+        }
+
+        .clear-form-btn:hover {
+            background: #cccccc;
+            color: #000000;
+        }
+
+        /* Alerts Section */
+        .alerts-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        .alerts-header {
+            margin-bottom: 25px;
+        }
+
+        .alerts-title {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #ffffff;
+            margin-bottom: 8px;
+        }
+
+        .alerts-subtitle {
+            color: #cccccc;
+            font-size: 1rem;
+        }
+
+        .alerts-list {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .alert-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 20px;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .alert-card:hover {
+            transform: translateY(-2px);
+            background: rgba(255, 255, 255, 0.05);
+            border-color: rgba(239, 65, 75, 0.3);
+        }
+
+        .alert-card.unread {
+            border-left: 4px solid #ef414b;
+            background: rgba(239, 65, 75, 0.05);
+        }
+
+        .alert-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+
+        .alert-type {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .alert-type.attendance { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
+        .alert-type.performance { background: rgba(220, 53, 69, 0.2); color: #dc3545; }
+        .alert-type.schedule { background: rgba(0, 123, 255, 0.2); color: #007bff; }
+        .alert-type.policy { background: rgba(108, 117, 125, 0.2); color: #6c757d; }
+        .alert-type.general { background: rgba(40, 167, 69, 0.2); color: #28a745; }
+        .alert-type.urgent { background: rgba(239, 65, 75, 0.2); color: #ef414b; }
+
+        .alert-priority {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .alert-priority.low { background: rgba(40, 167, 69, 0.2); color: #28a745; }
+        .alert-priority.medium { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
+        .alert-priority.high { background: rgba(255, 108, 55, 0.2); color: #ff6c37; }
+        .alert-priority.urgent { background: rgba(220, 53, 69, 0.2); color: #dc3545; }
+
+        .alert-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #ffffff;
+            margin-bottom: 10px;
+        }
+
+        .alert-message {
+            color: #cccccc;
+            line-height: 1.6;
+            margin-bottom: 15px;
+        }
+
+        .alert-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.85rem;
+            color: #888888;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .alert-date {
+            color: #aaaaaa;
+        }
+
+        .alert-sender {
+            color: #ef414b;
+            font-weight: 500;
+        }
+
+        .alert-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .alert-btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .alert-btn.mark-read {
+            background: rgba(40, 167, 69, 0.2);
+            color: #28a745;
+            border: 1px solid rgba(40, 167, 69, 0.3);
+        }
+
+        .alert-btn.mark-read:hover {
+            background: rgba(40, 167, 69, 0.3);
+            transform: translateY(-1px);
+        }
+
+        .no-alerts {
+            text-align: center;
+            color: #888888;
+            padding: 40px 20px;
+        }
+
+        .no-alerts p {
+            margin-bottom: 10px;
+        }
+
+        /* Exception History Section */
+        .exception-history-section {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+
+        .exception-history-header {
+            margin-bottom: 25px;
+        }
+
+        .exception-history-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #ef414b;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .exception-history-title::before {
+            content: '📋';
+            font-size: 1.2rem;
+        }
+
+        .exception-history-subtitle {
+            color: #cccccc;
+            font-size: 1rem;
+        }
+
+        .exception-history-list {
+            display: grid;
+            gap: 15px;
+        }
+
+        .exception-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            padding: 20px;
+            transition: all 0.3s ease;
+        }
+
+        .exception-card:hover {
+            border-color: rgba(239, 65, 75, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .exception-header-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .exception-type {
+            font-weight: 600;
+            color: #ffffff;
+            font-size: 1.1rem;
+        }
+
+        .exception-status {
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .status-pending {
+            background: rgba(255, 193, 7, 0.2);
+            color: #ffc107;
+            border: 1px solid rgba(255, 193, 7, 0.3);
+        }
+
+        .status-approved {
+            background: rgba(40, 167, 69, 0.2);
+            color: #28a745;
+            border: 1px solid rgba(40, 167, 69, 0.3);
+        }
+
+        .status-rejected {
+            background: rgba(220, 53, 69, 0.2);
+            color: #dc3545;
+            border: 1px solid rgba(220, 53, 69, 0.3);
+        }
+
+        .exception-details {
+            color: #cccccc;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            margin-bottom: 15px;
+        }
+
+        .exception-meta {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            font-size: 0.85rem;
+            color: #888888;
+        }
+
+        .no-exceptions {
+            text-align: center;
+            color: #888888;
+            padding: 40px;
+            font-style: italic;
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #cccccc;
+        }
+
+        .spinner {
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-top: 3px solid #ef414b;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .dashboard-header {
+                padding: 15px 20px;
+                flex-direction: column;
+                gap: 15px;
+            }
+
+            .header-actions {
+                width: 100%;
+                justify-content: center;
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+            
+            .session-info {
+                margin-right: 0;
+                order: -1;
+                width: 100%;
+                justify-content: center;
+            }
+            
+            .session-time {
+                font-size: 0.8rem;
+                padding: 6px 10px;
+            }
+
+            .dashboard-container {
+                padding: 20px;
+            }
+
+            .welcome-title {
+                font-size: 1.5rem;
+            }
+
+            .worker-stats {
+                grid-template-columns: 1fr;
+            }
+
+            .profile-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .tasks-header {
+                flex-direction: column;
+                gap: 15px;
+                align-items: stretch;
+            }
+
+            .task-header {
+                flex-direction: column;
+                gap: 10px;
+                align-items: flex-start;
+            }
+
+            .task-actions {
+                justify-content: flex-start;
+            }
+
+            .exception-form {
+                gap: 15px;
+            }
+
+            .form-actions {
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            .exception-meta {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <header class="dashboard-header">
+        <div class="dashboard-title">Worker Dashboard</div>
+        <div class="header-actions">
+            <div class="session-info">
+                <span class="session-time" id="headerSessionTime">-</span>
+            </div>
+            <a href="index.html" class="home-btn">
+                🏠 Back to Site
+            </a>
+            <button class="logout-btn" onclick="logout()">
+                🚪 Logout
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="dashboard-container">
+        <!-- Welcome Section -->
+        <section class="welcome-section">
+            <h1 class="welcome-title" id="welcomeTitle">Welcome!</h1>
+            <p class="welcome-subtitle">Manage your tasks and track your progress</p>
+            
+            <div class="worker-stats">
+                <div class="stat-card">
+                    <div class="stat-number" id="totalTasks">-</div>
+                    <div class="stat-label">Total Tasks</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="completedTasks">-</div>
+                    <div class="stat-label">Completed Tasks</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="pendingTasks">-</div>
+                    <div class="stat-label">Pending Tasks</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="completionRate">-</div>
+                    <div class="stat-label">Completion Rate</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="sessionDuration">-</div>
+                    <div class="stat-label">Session Duration</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Profile Section -->
+        <section class="profile-section">
+            <h2 class="section-title">Profile Information</h2>
+            <div class="profile-grid" id="profileGrid">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading profile...</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Exception Submission Section -->
+        <section class="exception-section">
+            <div class="exception-header">
+                <h2 class="exception-title">Submit Exception</h2>
+                <p class="exception-subtitle">Report late arrival or absence with explanation</p>
+            </div>
+            <div class="exception-form-container">
+                <form id="exceptionForm" class="exception-form">
+                    <div class="form-group">
+                        <label for="exceptionType">Exception Type:</label>
+                        <select id="exceptionType" name="exceptionType" required>
+                            <option value="">Select exception type</option>
+                            <option value="late">Late Arrival (30-120 minutes)</option>
+                            <option value="absent">Absent for the Day</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group" id="lateMinutesGroup" style="display: none;">
+                        <label for="lateMinutes">Minutes Late:</label>
+                        <input type="number" id="lateMinutes" name="lateMinutes" min="30" max="120" placeholder="Enter minutes (30-120)">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="exceptionDate">Date of Exception:</label>
+                        <input type="date" id="exceptionDate" name="exceptionDate" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="exceptionReason">Reason/Explanation:</label>
+                        <textarea id="exceptionReason" name="exceptionReason" rows="4" placeholder="Please provide a detailed explanation for your late arrival or absence..." required></textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="supportingEvidence">Supporting Evidence (Optional):</label>
+                        <textarea id="supportingEvidence" name="supportingEvidence" rows="3" placeholder="Any additional information, documents, or evidence that supports your explanation..."></textarea>
+                    </div>
+                    
+                    <div class="form-actions">
+                        <button type="submit" class="submit-exception-btn">Submit Exception</button>
+                        <button type="button" class="clear-form-btn" onclick="clearExceptionForm()">Clear Form</button>
+                    </div>
+                </form>
+            </div>
+        </section>
+
+        <!-- Alerts Section -->
+        <section class="alerts-section">
+            <div class="alerts-header">
+                <h2 class="alerts-title">📢 HR Alerts</h2>
+                <p class="alerts-subtitle">Important messages and notifications from management</p>
+            </div>
+            <div class="alerts-list" id="alertsList">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading alerts...</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Exception History Section -->
+        <section class="exception-history-section">
+            <div class="exception-history-header">
+                <h2 class="exception-history-title">Exception History</h2>
+                <p class="exception-history-subtitle">View your submitted exceptions and their status</p>
+            </div>
+            <div class="exception-history-list" id="exceptionHistoryList">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading exception history...</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Tasks Section -->
+        <section class="tasks-section">
+            <div class="tasks-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <h2 class="tasks-title">Your Tasks</h2>
+                <button onclick="openCreateTaskModal()" style="padding: 12px 24px; background: #ef414b; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.3s ease; display: flex; align-items: center; gap: 8px;" onmouseover="this.style.background='#d63641'" onmouseout="this.style.background='#ef414b'">
+                    ➕ Create Task
+                </button>
+            </div>
+            <div class="tasks-list" id="tasksList">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading tasks...</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Create Task Modal -->
+    <div id="createTaskModal" class="modal" style="display: none;">
+        <div class="modal-content" style="background: rgba(20, 20, 20, 0.98); border: 1px solid rgba(239, 65, 75, 0.3); border-radius: 16px; padding: 30px; max-width: 600px; margin: 50px auto; color: white;">
+            <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px;">
+                <h2 style="color: #ef414b; margin: 0;">Create New Task</h2>
+                <span class="close" onclick="closeCreateTaskModal()" style="cursor: pointer; font-size: 28px; color: #fff;">&times;</span>
+            </div>
+            <form id="createTaskForm" style="display: flex; flex-direction: column; gap: 20px;">
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Project *</label>
+                    <select id="createTaskProjectId" required style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 1rem;">
+                        <option value="">Select Project</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Task Title *</label>
+                    <input type="text" id="createTaskTitle" required style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 1rem;">
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Description *</label>
+                    <textarea id="createTaskDescription" required rows="4" style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 1rem; resize: vertical;"></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Department *</label>
+                    <select id="createTaskDepartment" required style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 1rem;">
+                        <option value="">Select Department</option>
+                        <option value="social-media">Social Media</option>
+                        <option value="web-development">Web Development</option>
+                        <option value="media-buying">Media Buying</option>
+                        <option value="branding">Branding</option>
+                        <option value="seo">SEO</option>
+                        <option value="content-creation">Content Creation</option>
+                        <option value="general">General</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Priority</label>
+                    <select id="createTaskPriority" style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 1rem;">
+                        <option value="low">Low</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="high">High</option>
+                        <option value="urgent">Urgent</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Assign To Workers (Select Multiple) *</label>
+                    <div id="createTaskAssignedToContainer" style="max-height: 200px; overflow-y: auto; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 8px; border: 1px solid rgba(255,255,255,0.2);">
+                        <div style="color: #999; padding: 10px;">Loading workers...</div>
+                    </div>
+                    <div style="color: #ffc107; font-size: 0.85rem; margin-top: 5px;">
+                        ✓ Check one or more workers to assign them to this task
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Due Date</label>
+                    <input type="date" id="createTaskDueDate" style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 1rem;">
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Photo Filename (optional)</label>
+                    <input type="text" id="createTaskPhoto" placeholder="e.g., design.webp or photo.jpg" style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 1rem;">
+                    <div style="color: #999; font-size: 0.85rem; margin-top: 5px;">
+                        📁 Place photos in the <strong>photos/</strong> folder. Enter just the filename (e.g., "photo.webp")
+                    </div>
+                    <div id="createTaskPhotoPreview" style="margin-top: 10px; display: none;">
+                        <img id="createTaskPhotoPreviewImg" style="max-width: 200px; max-height: 200px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2);">
+                    </div>
+                </div>
+                
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                    <button type="button" onclick="closeCreateTaskModal()" style="flex: 1; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-weight: 600; cursor: pointer;">
+                        Cancel
+                    </button>
+                    <button type="submit" style="flex: 1; padding: 12px; background: #ef414b; border: none; border-radius: 8px; color: white; font-weight: 600; cursor: pointer;">
+                        Create Task
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Edit Task Modal -->
+    <div id="editTaskModal" class="modal" style="display: none;">
+        <div class="modal-content" style="background: rgba(20, 20, 20, 0.98); border: 1px solid rgba(239, 65, 75, 0.3); border-radius: 16px; padding: 30px; max-width: 600px; margin: 50px auto; color: white;">
+            <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px;">
+                <h2 style="color: #ef414b; margin: 0;">Edit Task</h2>
+                <span class="close" onclick="closeEditTaskModal()" style="cursor: pointer; font-size: 28px; color: #fff;">&times;</span>
+            </div>
+            <form id="editTaskForm" style="display: flex; flex-direction: column; gap: 20px;">
+                <input type="hidden" id="editTaskId">
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Task Title *</label>
+                    <input type="text" id="editTaskTitle" required style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 1rem;">
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Description *</label>
+                    <textarea id="editTaskDescription" required rows="4" style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 1rem; resize: vertical;"></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Priority</label>
+                    <select id="editTaskPriority" style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 1rem;">
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                        <option value="urgent">Urgent</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Assign To Workers (Select Multiple) *</label>
+                    <div id="editTaskAssignedToContainer" style="max-height: 200px; overflow-y: auto; padding: 10px; background: rgba(0,0,0,0.3); border-radius: 8px; border: 1px solid rgba(255,255,255,0.2);">
+                        <div style="color: #999; padding: 10px;">Loading workers...</div>
+                    </div>
+                    <div style="color: #ffc107; font-size: 0.85rem; margin-top: 5px;">
+                        ✓ You can reassign this task to multiple workers in your team
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Status</label>
+                    <select id="editTaskStatus" style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 1rem;">
+                        <option value="assigned">Assigned</option>
+                        <option value="in-progress">In Progress</option>
+                        <option value="pending-approval">Pending Approval</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #999; font-weight: 600;">Due Date (Read Only)</label>
+                    <input type="text" id="editTaskDueDate" readonly style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; color: #999; font-size: 1rem; cursor: not-allowed;">
+                    <div style="color: #888; font-size: 0.85rem; margin-top: 5px;">
+                        🔒 Due date can only be changed by admin
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label style="display: block; margin-bottom: 8px; color: #ef414b; font-weight: 600;">Photo Filename (optional)</label>
+                    <input type="text" id="editTaskPhoto" placeholder="e.g., design.webp or photo.jpg" style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-size: 1rem;">
+                    <div style="color: #999; font-size: 0.85rem; margin-top: 5px;">
+                        📁 Place photos in the <strong>photos/</strong> folder. Enter just the filename (e.g., "photo.webp")
+                    </div>
+                    <div id="editTaskPhotoPreview" style="margin-top: 10px; display: none;">
+                        <img id="editTaskPhotoPreviewImg" style="max-width: 200px; max-height: 200px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.2);">
+                    </div>
+                </div>
+                
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                    <button type="button" onclick="closeEditTaskModal()" style="flex: 1; padding: 12px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; color: white; font-weight: 600; cursor: pointer;">
+                        Cancel
+                    </button>
+                    <button type="submit" style="flex: 1; padding: 12px; background: #ef414b; border: none; border-radius: 8px; color: white; font-weight: 600; cursor: pointer;">
+                        Save Changes
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+                                 let currentWorker = null;
+        let workerTasks = [];
+        let workerProjects = [];
+        let allWorkers = [];
+        let workerExceptions = [];
+        let workerAlerts = [];
+        let pageFullyLoaded = false;
+        let currentWorkSession = null;
+        
+        // Timer management variables
+        let sessionUpdateTimer = null;
+        let sessionTimeoutTimer = null;
+        let isTimersActive = false;
+
+        // Check authentication with Firebase Auth
+        async function checkAuth() {
+            return new Promise((resolve) => {
+                window.onAuthStateChanged(window.auth, async (user) => {
+                    if (!user) {
+                        console.log('❌ No Firebase Auth user found');
+                        // Try to authenticate with stored credentials
+                        const workerData = localStorage.getItem('currentWorker');
+                        if (workerData) {
+                            const worker = JSON.parse(workerData);
+                            try {
+                                // Try to sign in with stored email and a default password
+                                // Note: This is a temporary solution, ideally worker should login properly
+                                console.log('🔄 Attempting Firebase Auth with stored credentials...');
+                                // Try common passwords that workers might have
+                                const possiblePasswords = ['worker123', worker.email.split('@')[0] + '123', 'password123'];
+                                let authSuccess = false;
+                                
+                                for (const password of possiblePasswords) {
+                                    try {
+                                        await window.signInWithEmailAndPassword(window.auth, worker.email, password);
+                                        console.log('✅ Firebase Auth successful with password:', password);
+                                        authSuccess = true;
+                                        break;
+                                    } catch (authError) {
+                                        console.log('❌ Auth failed with password:', password);
+                                    }
+                                }
+                                
+                                if (!authSuccess) {
+                                    throw new Error('Failed to authenticate with any password');
+                                }
+                                console.log('✅ Firebase Auth successful');
+                                currentWorker = worker;
+                                resolve(true);
+                            } catch (error) {
+                                console.error('❌ Firebase Auth failed:', error);
+                                alert('Please login again. Authentication expired.');
+                                window.location.href = 'index.html';
+                                resolve(false);
+                            }
+                        } else {
+                            window.location.href = 'index.html';
+                            resolve(false);
+                        }
+                    } else {
+                        console.log('✅ Firebase Auth user found:', user.email);
+                        // Get worker data from localStorage or Firestore
+                        const workerData = localStorage.getItem('currentWorker');
+                        if (workerData) {
+                            currentWorker = JSON.parse(workerData);
+                        } else {
+                            // Fetch worker data from Firestore using UID
+                            try {
+                                const workerDoc = await window.getDoc(window.doc(window.db, 'workers', user.uid));
+                                if (workerDoc.exists()) {
+                                    currentWorker = { uid: user.uid, ...workerDoc.data() };
+                                    localStorage.setItem('currentWorker', JSON.stringify(currentWorker));
+                                } else {
+                                    console.error('Worker document not found');
+                                    alert('Worker profile not found. Please contact administrator.');
+                                    resolve(false);
+                                    return;
+                                }
+                            } catch (error) {
+                                console.error('Error fetching worker data:', error);
+                                resolve(false);
+                                return;
+                            }
+                        }
+                        resolve(true);
+                    }
+                });
+            });
+        }
+
+                 // Logout function
+         async function logout() {
+             if (confirm('Are you sure you want to logout?')) {
+                 try {
+                     console.log('🚪 Starting logout process...');
+                     
+                     // CRITICAL: Stop all timers immediately
+                     stopSessionTimers();
+                     
+                     // End work session tracking
+                     await endWorkSession();
+                     
+                     // Record logout time before signing out
+                     if (currentWorker && currentWorker.uid) {
+                         await window.updateDoc(window.doc(window.db, "workers", currentWorker.uid), {
+                             lastLogout: window.serverTimestamp(),
+                             isOnline: false
+                         });
+                     }
+                     
+                     // Clear global state
+                     currentWorkSession = null;
+                     currentWorker = null;
+                     pageFullyLoaded = false;
+                     
+                     // Firebase signout
+                     await window.signOut(window.auth);
+                     
+                     // Clear localStorage
+                     localStorage.removeItem('workerAuthenticated');
+                     localStorage.removeItem('currentWorker');
+                     localStorage.removeItem('workerLoginTime');
+                     
+                     console.log('✅ Logout completed successfully');
+                     window.location.href = 'index.html';
+                     
+                 } catch (error) {
+                     console.error('❌ Logout error:', error);
+                     
+                     // CRITICAL: Even if logout fails, stop timers and clear data
+                     stopSessionTimers();
+                     currentWorkSession = null;
+                     currentWorker = null;
+                     pageFullyLoaded = false;
+                     
+                     // Still clear localStorage and redirect even if logout time recording fails
+                     localStorage.removeItem('workerAuthenticated');
+                     localStorage.removeItem('currentWorker');
+                     localStorage.removeItem('workerLoginTime');
+                     window.location.href = 'index.html';
+                 }
+             }
+         }
+
+        // Load worker profile
+        async function loadWorkerProfile() {
+            try {
+                const workerDoc = await window.getDoc(window.doc(window.db, "workers", currentWorker.uid));
+                
+                if (workerDoc.exists()) {
+                    const workerData = workerDoc.data();
+                    console.log('Worker profile loaded. Online status:', workerData.isOnline);
+                    
+                    // Update welcome title
+                    document.getElementById('welcomeTitle').textContent = `Welcome, ${workerData.firstName}!`;
+                    
+                    // Update welcome subtitle with login time
+                    const loginTime = localStorage.getItem('workerLoginTime') ? new Date(localStorage.getItem('workerLoginTime')).toLocaleString() : 'Session started';
+                    document.querySelector('.welcome-subtitle').textContent = `Logged in at ${loginTime} • Manage your tasks and track your progress`;
+                    
+                    // Update profile grid
+                    const profileGrid = document.getElementById('profileGrid');
+                    profileGrid.innerHTML = `
+                        <div class="profile-item">
+                            <div class="profile-label">Full Name</div>
+                            <div class="profile-value">${workerData.firstName} ${workerData.lastName}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Email Address</div>
+                            <div class="profile-value">${workerData.email}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Phone Number</div>
+                            <div class="profile-value">${workerData.phone}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Role/Position</div>
+                            <div class="profile-value">${formatRole(workerData.role)}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Experience</div>
+                            <div class="profile-value">${workerData.experience}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Department</div>
+                            <div class="profile-value">${workerData.department || 'N/A'}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Work Type</div>
+                            <div class="profile-value">${formatWorkType(workerData.employmentType)}</div>
+                        </div>
+                         <div class="profile-item">
+                             <div class="profile-label">Expected Monthly Salary</div>
+                             <div class="profile-value">
+                                 <div style="display: flex; align-items: center; gap: 10px;">
+                                     <span id="expectedSalaryDisplay">${workerData.expectedSalary ? `EGP ${workerData.expectedSalary}` : 'Not set'}</span>
+                                     <button onclick="editExpectedSalary()" style="background: #ef414b; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; cursor: pointer;">Edit</button>
+                                 </div>
+                                 <div id="expectedSalaryEditForm" style="display: none; margin-top: 10px;">
+                                     <input type="number" id="expectedSalaryInput" min="0" step="0.01" value="${workerData.expectedSalary || ''}" style="width: 120px; padding: 5px; border: 1px solid #ef414b; border-radius: 4px; background: rgba(255, 255, 255, 0.1); color: white;">
+                                     <button onclick="saveExpectedSalary()" style="background: #28a745; color: white; border: none; padding: 5px 10px; border-radius: 4px; font-size: 0.8rem; cursor: pointer; margin-left: 5px;">Save</button>
+                                     <button onclick="cancelEditExpectedSalary()" style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 4px; font-size: 0.8rem; cursor: pointer; margin-left: 5px;">Cancel</button>
+                                 </div>
+                             </div>
+                         </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Location</div>
+                            <div class="profile-value">${workerData.government || 'N/A'}, ${workerData.city || 'N/A'}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Skills</div>
+                            <div class="profile-value">${workerData.skills && workerData.skills.length > 0 ? workerData.skills.join(', ') : 'Not specified'}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Portfolio Link</div>
+                            <div class="profile-value">${workerData.portfolioLink ? `<a href="${workerData.portfolioLink}" target="_blank" style="color: #ef414b;">View Portfolio</a>` : 'Not provided'}</div>
+                        </div>
+                                                 <div class="profile-item">
+                             <div class="profile-label">Time to Leave Current Job</div>
+                             <div class="profile-value">${workerData.netspend || 'Not specified'}</div>
+                         </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Account Status</div>
+                            <div class="profile-value">
+                                <span class="status-badge status-${workerData.status}">
+                                    ${workerData.status.toUpperCase()}
+                                </span>
+                            </div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Member Since</div>
+                            <div class="profile-value">${workerData.createdAt ? new Date(workerData.createdAt.toDate()).toLocaleDateString() : 'N/A'}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Last Login</div>
+                            <div class="profile-value">${workerData.lastLogin ? new Date(workerData.lastLogin.toDate()).toLocaleDateString() + ' ' + new Date(workerData.lastLogin.toDate()).toLocaleTimeString() : 'N/A'}</div>
+                        </div>
+                        <div class="profile-item">
+                            <div class="profile-label">Current Session</div>
+                            <div class="profile-value">${localStorage.getItem('workerLoginTime') ? new Date(localStorage.getItem('workerLoginTime')).toLocaleDateString() + ' ' + new Date(localStorage.getItem('workerLoginTime')).toLocaleTimeString() : 'N/A'}</div>
+                        </div>
+                    `;
+
+                    // Update current worker data
+                    currentWorker = { ...currentWorker, ...workerData };
+                }
+            } catch (error) {
+                console.error('Error loading worker profile:', error);
+                document.getElementById('profileGrid').innerHTML = '<p style="color: #ff4757;">Error loading profile data</p>';
+            }
+        }
+
+        // Format role for display
+        function formatRole(role) {
+            return role.split('-').map(word => 
+                word.charAt(0).toUpperCase() + word.slice(1)
+            ).join(' ');
+        }
+
+        // Format work type for display
+        function formatWorkType(workType) {
+            if (!workType) return 'N/A';
+            return workType.split('-').map(word => 
+                word.charAt(0).toUpperCase() + word.slice(1)
+            ).join(' ');
+        }
+
+        // Load worker tasks
+        async function loadWorkerTasks() {
+            try {
+                console.log('Loading tasks for worker:', currentWorker.uid);
+                
+                // Load all projects first
+                const projectsSnapshot = await window.getDocs(window.collection(window.db, "projects"));
+                workerProjects = [];
+                projectsSnapshot.forEach((doc) => {
+                    workerProjects.push({
+                        id: doc.id,
+                        ...doc.data()
+                    });
+                });
+                
+                // Sort projects by creation date (newest first) in memory
+                workerProjects.sort((a, b) => {
+                    const dateA = a.createdAt ? a.createdAt.toDate() : new Date(0);
+                    const dateB = b.createdAt ? b.createdAt.toDate() : new Date(0);
+                    return dateB - dateA;
+                });
+                
+                console.log('Loaded', workerProjects.length, 'projects');
+                
+                // Load all workers for task assignment
+                await loadAllWorkers();
+                
+                // Load tasks assigned to this worker (supports both single and array assignedTo)
+                const q = window.query(
+                    window.collection(window.db, "tasks"),
+                    window.where("assignedTo", "array-contains", currentWorker.uid)
+                );
+                
+                const querySnapshot = await window.getDocs(q);
+                console.log('Query completed, found', querySnapshot.size, 'tasks');
+                
+                workerTasks = [];
+                
+                querySnapshot.forEach((doc) => {
+                    const data = doc.data();
+                    console.log('Task data:', data);
+                    console.log('Task ID:', doc.id);
+                    console.log('Task assignedTo:', data.assignedTo);
+                    console.log('Current worker UID:', currentWorker.uid);
+                    workerTasks.push({
+                        id: doc.id,
+                        ...data
+                    });
+                });
+                
+                // Sort tasks by creation date (newest first)
+                workerTasks.sort((a, b) => {
+                    const dateA = a.createdAt ? a.createdAt.toDate() : new Date(0);
+                    const dateB = b.createdAt ? b.createdAt.toDate() : new Date(0);
+                    return dateB - dateA;
+                });
+
+                displayTasks();
+                updateTaskStats();
+                
+            } catch (error) {
+                console.error('Error loading tasks and projects:', error);
+                console.error('Error code:', error.code);
+                console.error('Error message:', error.message);
+                
+                let errorMessage = 'Error loading tasks and projects';
+                let suggestion = '';
+                
+                if (error.code === 'permission-denied') {
+                    errorMessage = 'Permission denied accessing Firestore.';
+                    suggestion = 'Please make sure:<br>1. You are logged in<br>2. Firestore rules allow workers to read "projects" and "tasks" collections<br>3. Try logging out and back in';
+                } else if (error.code === 'unavailable') {
+                    errorMessage = 'Firebase service temporarily unavailable.';
+                    suggestion = 'Please check your internet connection and try again.';
+                } else if (error.message && error.message.includes('index')) {
+                    errorMessage = 'Database index required.';
+                    suggestion = 'An administrator needs to create a database index. Contact your admin.';
+                }
+                
+                document.getElementById('tasksList').innerHTML = `
+                    <div style="color: #ff4757; text-align: center; padding: 20px; background: rgba(255, 71, 87, 0.1); border: 1px solid #ff4757; border-radius: 8px;">
+                        <p><strong>${errorMessage}</strong></p>
+                        <p style="color: #cccccc;">Error: ${error.message}</p>
+                        ${suggestion ? `<p style="color: #ffc107; margin-top: 10px;">${suggestion}</p>` : ''}
+                        <button onclick="loadWorkerTasks()" style="margin-top: 10px; padding: 8px 16px; background: #ef414b; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                            Try Again
+                        </button>
+                    </div>
+                `;
+            }
+        }
+
+        // Toggle project tasks
+        function toggleProjectTasks(projectId) {
+            const tasksSection = document.getElementById(`tasks-${projectId}`);
+            const expandIcon = document.getElementById(`expand-icon-${projectId}`);
+            
+            if (tasksSection.classList.contains('expanded')) {
+                tasksSection.classList.remove('expanded');
+                expandIcon.classList.remove('expanded');
+            } else {
+                tasksSection.classList.add('expanded');
+                expandIcon.classList.add('expanded');
+            }
+        }
+
+        // Populate worker checkboxes for multi-select
+        function populateWorkerCheckboxes(containerId, selectedWorkers = []) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = '';
+            
+            if (allWorkers.length === 0) {
+                container.innerHTML = '<div style="color: #999; padding: 10px;">No workers available</div>';
+                return;
+            }
+            
+            allWorkers.forEach(worker => {
+                const isChecked = Array.isArray(selectedWorkers) ? selectedWorkers.includes(worker.id) : false;
+                const checkboxItem = document.createElement('label');
+                checkboxItem.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 8px; cursor: pointer; border-radius: 6px; transition: background 0.2s;';
+                checkboxItem.onmouseover = function() { this.style.background = 'rgba(255,255,255,0.05)'; };
+                checkboxItem.onmouseout = function() { this.style.background = 'transparent'; };
+                
+                checkboxItem.innerHTML = `
+                    <input type="checkbox" class="worker-checkbox" value="${worker.id}" ${isChecked ? 'checked' : ''} style="width: 18px; height: 18px; cursor: pointer;">
+                    <span style="color: #fff;">${worker.firstName} ${worker.lastName}</span>
+                `;
+                container.appendChild(checkboxItem);
+            });
+        }
+
+        // Get selected workers from checkboxes
+        function getSelectedWorkers(containerId) {
+            const container = document.getElementById(containerId);
+            const checkboxes = container.querySelectorAll('.worker-checkbox:checked');
+            return Array.from(checkboxes).map(cb => cb.value);
+        }
+
+        // Open create task modal
+        function openCreateTaskModal() {
+            // Populate projects dropdown
+            const projectSelect = document.getElementById('createTaskProjectId');
+            projectSelect.innerHTML = '<option value="">Select Project</option>';
+            workerProjects.forEach(project => {
+                const option = document.createElement('option');
+                option.value = project.id;
+                option.textContent = project.name;
+                projectSelect.appendChild(option);
+            });
+
+            // Populate worker checkboxes (pre-check current worker)
+            populateWorkerCheckboxes('createTaskAssignedToContainer', [currentWorker.uid]);
+
+            // Show modal
+            document.getElementById('createTaskModal').style.display = 'block';
+        }
+
+        // Close create task modal
+        function closeCreateTaskModal() {
+            document.getElementById('createTaskModal').style.display = 'none';
+            document.getElementById('createTaskForm').reset();
+            document.getElementById('createTaskPhotoPreview').style.display = 'none';
+        }
+
+        // Photo preview for create and edit task
+        document.addEventListener('DOMContentLoaded', function() {
+            const createPhotoInput = document.getElementById('createTaskPhoto');
+            if (createPhotoInput) {
+                createPhotoInput.addEventListener('input', function(e) {
+                    const filename = e.target.value.trim();
+                    const preview = document.getElementById('createTaskPhotoPreview');
+                    const img = document.getElementById('createTaskPhotoPreviewImg');
+                    
+                    if (filename) {
+                        img.src = `../photos/${filename}`;
+                        img.onerror = function() {
+                            preview.style.display = 'none';
+                            img.src = '';
+                        };
+                        img.onload = function() {
+                            preview.style.display = 'block';
+                        };
+                    } else {
+                        preview.style.display = 'none';
+                        img.src = '';
+                    }
+                });
+            }
+            
+            const editPhotoInput = document.getElementById('editTaskPhoto');
+            if (editPhotoInput) {
+                editPhotoInput.addEventListener('input', function(e) {
+                    const filename = e.target.value.trim();
+                    const preview = document.getElementById('editTaskPhotoPreview');
+                    const img = document.getElementById('editTaskPhotoPreviewImg');
+                    
+                    if (filename) {
+                        img.src = `../photos/${filename}`;
+                        img.onerror = function() {
+                            preview.style.display = 'none';
+                            img.src = '';
+                        };
+                        img.onload = function() {
+                            preview.style.display = 'block';
+                        };
+                    } else {
+                        preview.style.display = 'none';
+                        img.src = '';
+                    }
+                });
+            }
+        });
+
+        // Handle create task form submission
+        document.getElementById('createTaskForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const assignedWorkers = getSelectedWorkers('createTaskAssignedToContainer');
+            if (assignedWorkers.length === 0) {
+                alert('⚠️ Please select at least one worker to assign this task to.');
+                return;
+            }
+
+            const dueDate = document.getElementById('createTaskDueDate').value;
+
+            const taskData = {
+                projectId: document.getElementById('createTaskProjectId').value,
+                title: document.getElementById('createTaskTitle').value,
+                description: document.getElementById('createTaskDescription').value,
+                department: document.getElementById('createTaskDepartment').value,
+                priority: document.getElementById('createTaskPriority').value,
+                assignedTo: assignedWorkers,  // Now an array
+                dueDate: dueDate ? new Date(dueDate) : null,
+                photo: document.getElementById('createTaskPhoto').value.trim() || null,
+                status: 'assigned',
+                createdAt: window.serverTimestamp(),
+                createdBy: currentWorker.uid,
+                assignedAt: window.serverTimestamp()
+            };
+
+            try {
+                await window.addDoc(window.collection(window.db, 'tasks'), taskData);
+                
+                alert(`✅ Task created successfully and assigned to ${assignedWorkers.length} worker(s)!`);
+                
+                closeCreateTaskModal();
+                loadWorkerTasks(); // Reload tasks
+                
+            } catch (error) {
+                console.error('Error creating task:', error);
+                alert('❌ Error creating task: ' + error.message);
+            }
+        });
+
+        // Load all workers for task assignment
+        async function loadAllWorkers() {
+            try {
+                const workersSnapshot = await window.getDocs(window.collection(window.db, "workers"));
+                allWorkers = [];
+                workersSnapshot.forEach((doc) => {
+                    allWorkers.push({
+                        id: doc.id,
+                        ...doc.data()
+                    });
+                });
+                console.log('Loaded', allWorkers.length, 'workers for assignment');
+            } catch (error) {
+                console.error('Error loading workers:', error);
+            }
+        }
+
+        // Open edit task modal
+        function openEditTaskModal(taskId) {
+            const task = workerTasks.find(t => t.id === taskId);
+            if (!task) return;
+
+            // Populate form fields
+            document.getElementById('editTaskId').value = task.id;
+            document.getElementById('editTaskTitle').value = task.title || '';
+            document.getElementById('editTaskDescription').value = task.description || '';
+            document.getElementById('editTaskPriority').value = task.priority || 'medium';
+            document.getElementById('editTaskStatus').value = task.status || 'assigned';
+            
+            // Show due date (read only)
+            if (task.dueDate) {
+                const dueDate = task.dueDate.toDate ? task.dueDate.toDate() : new Date(task.dueDate);
+                document.getElementById('editTaskDueDate').value = dueDate.toLocaleDateString();
+            } else {
+                document.getElementById('editTaskDueDate').value = 'No due date set';
+            }
+
+            // Populate worker checkboxes with pre-selected workers
+            const assignedWorkers = Array.isArray(task.assignedTo) ? task.assignedTo : (task.assignedTo ? [task.assignedTo] : []);
+            populateWorkerCheckboxes('editTaskAssignedToContainer', assignedWorkers);
+            
+            // Populate photo field
+            document.getElementById('editTaskPhoto').value = task.photo || '';
+            
+            // Show photo preview if exists
+            if (task.photo) {
+                const preview = document.getElementById('editTaskPhotoPreview');
+                const img = document.getElementById('editTaskPhotoPreviewImg');
+                img.src = `../photos/${task.photo}`;
+                img.onload = function() {
+                    preview.style.display = 'block';
+                };
+                img.onerror = function() {
+                    preview.style.display = 'none';
+                };
+            } else {
+                document.getElementById('editTaskPhotoPreview').style.display = 'none';
+            }
+
+            // Show modal
+            document.getElementById('editTaskModal').style.display = 'block';
+        }
+
+        // Close edit task modal
+        function closeEditTaskModal() {
+            document.getElementById('editTaskModal').style.display = 'none';
+            document.getElementById('editTaskForm').reset();
+        }
+
+        // Handle edit task form submission
+        document.getElementById('editTaskForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const assignedWorkers = getSelectedWorkers('editTaskAssignedToContainer');
+            if (assignedWorkers.length === 0) {
+                alert('⚠️ Please select at least one worker to assign this task to.');
+                return;
+            }
+
+            const taskId = document.getElementById('editTaskId').value;
+            const updatedData = {
+                title: document.getElementById('editTaskTitle').value,
+                description: document.getElementById('editTaskDescription').value,
+                priority: document.getElementById('editTaskPriority').value,
+                status: document.getElementById('editTaskStatus').value,
+                assignedTo: assignedWorkers,  // Now an array
+                photo: document.getElementById('editTaskPhoto').value.trim() || null,
+                updatedAt: window.serverTimestamp(),
+                updatedBy: currentWorker.uid
+            };
+
+            try {
+                await window.updateDoc(window.doc(window.db, 'tasks', taskId), updatedData);
+                
+                // Show success message
+                alert(`✅ Task updated successfully and assigned to ${assignedWorkers.length} worker(s)!`);
+                
+                closeEditTaskModal();
+                loadWorkerTasks(); // Reload tasks
+                
+            } catch (error) {
+                console.error('Error updating task:', error);
+                alert('❌ Error updating task: ' + error.message);
+            }
+        });
+
+        // Display tasks grouped by project
+        function displayTasks() {
+            const tasksList = document.getElementById('tasksList');
+            
+            if (workerTasks.length === 0) {
+                tasksList.innerHTML = `
+                    <div class="no-tasks">
+                        <p>No tasks assigned yet.</p>
+                        <p>Tasks will appear here when assigned by the administrator.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Group tasks by project
+            const projectGroups = {};
+            const tasksWithoutProject = [];
+            
+            workerTasks.forEach(task => {
+                if (task.projectId) {
+                    if (!projectGroups[task.projectId]) {
+                        projectGroups[task.projectId] = [];
+                    }
+                    projectGroups[task.projectId].push(task);
+                } else {
+                    tasksWithoutProject.push(task);
+                }
+            });
+
+            let html = '';
+
+            // Render projects with their tasks
+            Object.keys(projectGroups).forEach(projectId => {
+                const project = workerProjects.find(p => p.id === projectId);
+                const projectTasks = projectGroups[projectId];
+                
+                html += `
+                    <div class="project-card">
+                        <div class="project-header" onclick="toggleProjectTasks('${projectId}')">
+                            <div class="project-title-section">
+                                <span class="project-expand-icon" id="expand-icon-${projectId}">▶</span>
+                                <div class="project-title">${project ? project.name : 'Unknown Project'}</div>
+                                <span class="project-task-count">${projectTasks.length} task${projectTasks.length !== 1 ? 's' : ''}</span>
+                            </div>
+                        </div>
+                        ${project ? `
+                            <div class="project-info">
+                                <strong>Client:</strong> ${project.clientName || 'N/A'}<br>
+                                ${project.description ? `<strong>Description:</strong> ${project.description}<br>` : ''}
+                                ${project.projectTypes && project.projectTypes.length > 0 ? `<strong>Types:</strong> ${project.projectTypes.map(t => t.replace('-', ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')).join(', ')}` : ''}
+                            </div>
+                        ` : ''}
+                        
+                        <div class="project-tasks-section" id="tasks-${projectId}">
+                            ${projectTasks.map(task => `
+                                <div class="project-task-item">
+                                    <div class="task-header">
+                                        <div class="task-title">${task.title || 'Untitled Task'}</div>
+                                        <div class="task-status status-${task.status || 'assigned'}">
+                                            ${(task.status || 'assigned').toUpperCase()}
+                                        </div>
+                                    </div>
+                                    <div class="task-details">
+                                        <strong>Description:</strong> ${task.description || 'No description provided'}<br>
+                                        ${task.department ? `<strong>Department:</strong> ${task.department.replace('-', ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}<br>` : ''}
+                                        <strong>Priority:</strong> ${task.priority || 'Medium'}<br>
+                                        <strong>Due Date:</strong> ${task.dueDate ? new Date(task.dueDate.toDate()).toLocaleDateString() : 'No due date'}<br>
+                                        <strong>Assigned:</strong> ${task.createdAt ? new Date(task.createdAt.toDate()).toLocaleDateString() : 'N/A'}
+                                        ${task.status === 'pending-approval' && task.submittedForApprovalAt ? `<br><strong>Submitted for Approval:</strong> ${new Date(task.submittedForApprovalAt.toDate()).toLocaleDateString()}` : ''}
+                                        ${task.status === 'completed' && task.approvedAt ? `<br><strong>Approved:</strong> ${new Date(task.approvedAt.toDate()).toLocaleDateString()}` : ''}
+                                    </div>
+                                    ${task.photo ? `
+                                        <div style="margin: 10px 0;">
+                                            <img src="../photos/${task.photo}" alt="Task photo" style="max-width: 100%; max-height: 200px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.2);" onerror="this.style.display='none'">
+                                        </div>
+                                    ` : ''}
+                                    <div class="task-actions">
+                                        ${task.status === 'assigned' ? `
+                                            <button class="task-btn btn-start" onclick="startTask('${task.id}')">
+                                                Start Task
+                                            </button>
+                                        ` : ''}
+                                        ${task.status === 'in-progress' ? `
+                                            <button class="task-btn btn-complete" onclick="submitForApproval('${task.id}')">
+                                                Submit for Approval
+                                            </button>
+                                        ` : ''}
+                                        <button class="task-btn" style="background: #007bff;" onclick="openEditTaskModal('${task.id}')">
+                                            ✏️ Edit
+                                        </button>
+                                        <button class="task-btn btn-view" onclick="viewTaskDetails('${task.id}')">
+                                            View Details
+                                        </button>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            });
+
+            // Render tasks without projects
+            if (tasksWithoutProject.length > 0) {
+                html += tasksWithoutProject.map(task => `
+                    <div class="task-card">
+                        <div class="task-header">
+                            <div class="task-title">${task.title || 'Untitled Task'}</div>
+                            <div class="task-status status-${task.status || 'assigned'}">
+                                ${(task.status || 'assigned').toUpperCase()}
+                            </div>
+                        </div>
+                        <div class="task-details">
+                            <strong>Description:</strong> ${task.description || 'No description provided'}<br>
+                            ${task.department ? `<strong>Department:</strong> ${task.department.replace('-', ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}<br>` : ''}
+                            <strong>Priority:</strong> ${task.priority || 'Medium'}<br>
+                            <strong>Due Date:</strong> ${task.dueDate ? new Date(task.dueDate.toDate()).toLocaleDateString() : 'No due date'}<br>
+                            <strong>Assigned:</strong> ${task.createdAt ? new Date(task.createdAt.toDate()).toLocaleDateString() : 'N/A'}
+                            ${task.status === 'pending-approval' && task.submittedForApprovalAt ? `<br><strong>Submitted for Approval:</strong> ${new Date(task.submittedForApprovalAt.toDate()).toLocaleDateString()}` : ''}
+                            ${task.status === 'completed' && task.approvedAt ? `<br><strong>Approved:</strong> ${new Date(task.approvedAt.toDate()).toLocaleDateString()}` : ''}
+                        </div>
+                        ${task.photo ? `
+                            <div style="margin: 10px 0;">
+                                <img src="../photos/${task.photo}" alt="Task photo" style="max-width: 100%; max-height: 200px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.2);" onerror="this.style.display='none'">
+                            </div>
+                        ` : ''}
+                        <div class="task-actions">
+                            ${task.status === 'assigned' ? `
+                                <button class="task-btn btn-start" onclick="startTask('${task.id}')">
+                                    Start Task
+                                </button>
+                            ` : ''}
+                            ${task.status === 'in-progress' ? `
+                                <button class="task-btn btn-complete" onclick="submitForApproval('${task.id}')">
+                                    Submit for Approval
+                                </button>
+                            ` : ''}
+                            ${task.status === 'pending-approval' ? `
+                                <button class="task-btn btn-view" style="background: #ffc107; color: #000;">
+                                    ⏳ Awaiting Admin Approval
+                                </button>
+                            ` : ''}
+                            ${task.status === 'in-progress' && task.rejectionReason ? `
+                                <button class="task-btn btn-view" style="background: #dc3545; color: white;" onclick="viewRejectionReason('${task.id}')">
+                                    ❌ View Rejection Reason
+                                </button>
+                            ` : ''}
+                            <button class="task-btn" style="background: #007bff;" onclick="openEditTaskModal('${task.id}')">
+                                ✏️ Edit
+                            </button>
+                            <button class="task-btn btn-view" onclick="viewTaskDetails('${task.id}')">
+                                View Details
+                            </button>
+                        </div>
+                    </div>
+                `).join('');
+            }
+
+            tasksList.innerHTML = html;
+        }
+
+        // Update task statistics
+        function updateTaskStats() {
+            const totalTasks = workerTasks.length;
+            const completedTasks = workerTasks.filter(task => task.status === 'completed').length;
+            const pendingTasks = workerTasks.filter(task => task.status === 'assigned' || task.status === 'in-progress').length;
+            const pendingApprovalTasks = workerTasks.filter(task => task.status === 'pending-approval').length;
+            const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+
+            document.getElementById('totalTasks').textContent = totalTasks;
+            document.getElementById('completedTasks').textContent = completedTasks;
+            document.getElementById('pendingTasks').textContent = pendingTasks + pendingApprovalTasks;
+            document.getElementById('completionRate').textContent = `${completionRate}%`;
+            
+            // Update session duration
+            updateSessionDuration();
+        }
+        
+
+
+        // Start task
+        async function startTask(taskId) {
+            try {
+                await window.updateDoc(window.doc(window.db, "tasks", taskId), {
+                    status: 'in-progress',
+                    startedAt: window.serverTimestamp()
+                });
+                
+                // Update local data
+                const taskIndex = workerTasks.findIndex(task => task.id === taskId);
+                if (taskIndex !== -1) {
+                    workerTasks[taskIndex].status = 'in-progress';
+                    workerTasks[taskIndex].startedAt = new Date();
+                    displayTasks();
+                    updateTaskStats();
+                }
+                
+                alert('Task started successfully!');
+            } catch (error) {
+                console.error('Error starting task:', error);
+                alert('Error starting task. Please try again.');
+            }
+        }
+
+        // Submit task for approval
+        async function submitForApproval(taskId) {
+            try {
+                console.log('Submitting task for approval:', taskId);
+                console.log('Current worker:', currentWorker);
+                console.log('Firebase functions available:', {
+                    updateDoc: typeof window.updateDoc,
+                    doc: typeof window.doc,
+                    db: typeof window.db,
+                    serverTimestamp: typeof window.serverTimestamp
+                });
+                
+                await window.updateDoc(window.doc(window.db, "tasks", taskId), {
+                    status: 'pending-approval',
+                    submittedForApprovalAt: window.serverTimestamp()
+                });
+                
+                // Update local data
+                const taskIndex = workerTasks.findIndex(task => task.id === taskId);
+                if (taskIndex !== -1) {
+                    workerTasks[taskIndex].status = 'pending-approval';
+                    workerTasks[taskIndex].submittedForApprovalAt = new Date();
+                    displayTasks();
+                    updateTaskStats();
+                }
+                
+                alert('Task submitted for approval! Admin will review and approve your work.');
+            } catch (error) {
+                console.error('Error submitting task for approval:', error);
+                console.error('Error code:', error.code);
+                console.error('Error message:', error.message);
+                console.error('Error details:', error);
+                
+                let errorMessage = 'Error submitting task for approval. Please try again.';
+                
+                if (error.code === 'permission-denied') {
+                    errorMessage = 'Permission denied. You may not have permission to update this task.';
+                } else if (error.code === 'not-found') {
+                    errorMessage = 'Task not found. The task may have been deleted.';
+                } else if (error.code === 'unavailable') {
+                    errorMessage = 'Firebase service temporarily unavailable. Please try again.';
+                }
+                
+                alert(errorMessage);
+            }
+        }
+
+        // View task details
+        function viewTaskDetails(taskId) {
+            const task = workerTasks.find(task => task.id === taskId);
+            if (task) {
+                const details = `
+Task Details:
+- Title: ${task.title || 'Untitled Task'}
+- Description: ${task.description || 'No description provided'}
+- Project: ${task.projectName || 'N/A'}
+- Priority: ${task.priority || 'Medium'}
+- Status: ${task.status || 'Assigned'}
+- Due Date: ${task.dueDate ? new Date(task.dueDate.toDate()).toLocaleDateString() : 'No due date'}
+- Assigned: ${task.createdAt ? new Date(task.createdAt.toDate()).toLocaleDateString() : 'N/A'}
+                `;
+                alert(details);
+            }
+        }
+
+        // View rejection reason
+        function viewRejectionReason(taskId) {
+            const task = workerTasks.find(task => task.id === taskId);
+            if (task && task.rejectionReason) {
+                alert(`Task Rejection Reason:\n\n${task.rejectionReason}\n\nPlease make the necessary changes and submit for approval again.`);
+            }
+        }
+
+                 // Initialize work session tracking
+         async function initializeWorkSession() {
+             try {
+                 const loginTime = localStorage.getItem('workerLoginTime');
+                 if (!loginTime || !currentWorker) return;
+
+                 const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+                 
+                 console.log('🔍 Checking for existing work session for today:', today);
+                 
+                 // Check if a work session already exists for today
+                 const q = window.query(
+                     window.collection(window.db, 'workSessions'),
+                     window.where('workerId', '==', currentWorker.uid),
+                     window.where('date', '==', today)
+                 );
+                 
+                 const existingSessionsSnapshot = await window.getDocs(q);
+                 
+                 if (!existingSessionsSnapshot.empty) {
+                     console.log('📋 Found existing work session for today, using existing session');
+                     const existingSession = existingSessionsSnapshot.docs[0];
+                     const sessionData = existingSession.data();
+                     
+                     currentWorkSession = {
+                         id: existingSession.id,
+                         startTime: sessionData.startTime?.toDate ? sessionData.startTime.toDate() : new Date(sessionData.startTime),
+                         isActive: sessionData.isActive || true
+                     };
+                     
+                     console.log('✅ Using existing work session:', currentWorkSession);
+                     
+                     // Update the existing session to mark it as active again (for re-login)
+                     await window.updateDoc(window.doc(window.db, 'workSessions', currentWorkSession.id), {
+                         isActive: true,
+                         lastLoginTime: new Date(loginTime),
+                         lastUpdated: window.serverTimestamp()
+                     });
+                     
+                     return;
+                 }
+
+                 console.log('➕ No existing session found, creating new work session for today');
+                 
+                 // Create new work session record only if none exists for today
+                 const sessionDoc = await window.addDoc(window.collection(window.db, 'workSessions'), {
+                     workerId: currentWorker.uid,
+                     workerName: `${currentWorker.firstName} ${currentWorker.lastName}`,
+                     workerEmail: currentWorker.email,
+                     loginTime: new Date(loginTime),
+                     startTime: new Date(loginTime),
+                     isActive: true,
+                     totalWorkTime: 0,
+                     date: today,
+                     createdAt: window.serverTimestamp()
+                 });
+
+                 currentWorkSession = {
+                     id: sessionDoc.id,
+                     startTime: new Date(loginTime),
+                     isActive: true
+                 };
+
+                 console.log('✅ New work session created:', currentWorkSession);
+             } catch (error) {
+                 console.error('❌ Error initializing work session:', error);
+                 
+                 // If there's an error with the query (like missing index), create session anyway
+                 if (error.message && error.message.includes('index')) {
+                     console.log('⚠️  Index error detected, creating session without check');
+                     try {
+                         const sessionDoc = await window.addDoc(window.collection(window.db, 'workSessions'), {
+                             workerId: currentWorker.uid,
+                             workerName: `${currentWorker.firstName} ${currentWorker.lastName}`,
+                             workerEmail: currentWorker.email,
+                             loginTime: new Date(localStorage.getItem('workerLoginTime')),
+                             startTime: new Date(localStorage.getItem('workerLoginTime')),
+                             isActive: true,
+                             totalWorkTime: 0,
+                             date: new Date().toISOString().split('T')[0],
+                             createdAt: window.serverTimestamp()
+                         });
+                         
+                         currentWorkSession = {
+                             id: sessionDoc.id,
+                             startTime: new Date(localStorage.getItem('workerLoginTime')),
+                             isActive: true
+                         };
+                         
+                         console.log('✅ Fallback work session created:', currentWorkSession);
+                     } catch (fallbackError) {
+                         console.error('❌ Fallback session creation failed:', fallbackError);
+                     }
+                 }
+             }
+         }
+
+         // Update work session in Firebase
+         async function updateWorkSessionInFirebase() {
+             if (!currentWorkSession) return;
+
+             try {
+                 const now = new Date();
+                 const totalWorkTime = now - currentWorkSession.startTime;
+
+                 await window.updateDoc(window.doc(window.db, 'workSessions', currentWorkSession.id), {
+                     totalWorkTime: totalWorkTime,
+                     lastUpdated: window.serverTimestamp()
+                 });
+
+                 console.log('Work session updated in Firebase');
+             } catch (error) {
+                 console.error('Error updating work session:', error);
+             }
+         }
+
+         // End work session when logging out
+         async function endWorkSession() {
+             if (!currentWorkSession) return;
+
+             try {
+                 const logoutTime = new Date();
+                 const totalWorkTime = logoutTime - currentWorkSession.startTime;
+
+                 await window.updateDoc(window.doc(window.db, 'workSessions', currentWorkSession.id), {
+                     logoutTime: logoutTime,
+                     endTime: logoutTime,
+                     isActive: false,
+                     totalWorkTime: totalWorkTime,
+                     completedAt: window.serverTimestamp()
+                 });
+
+                 console.log('Work session ended:', {
+                     totalWorkTime: Math.round(totalWorkTime / 1000 / 60)
+                 });
+             } catch (error) {
+                 console.error('Error ending work session:', error);
+             }
+         }
+
+         // Initialize dashboard
+         async function initDashboard() {
+             console.log('🚀 Initializing worker dashboard...');
+             const isAuthenticated = await checkAuth();
+             if (!isAuthenticated) {
+                 console.log('❌ Authentication failed, redirecting...');
+                 return;
+             }
+
+             console.log('✅ Authentication successful, loading dashboard...');
+             await Promise.all([
+                 loadWorkerProfile(),
+                 loadWorkerTasks(),
+                 loadWorkerExceptions(),
+                 loadWorkerAlerts(),
+                 initializeWorkSession()
+             ]);
+             
+                         // Mark page as fully loaded after initialization
+            pageFullyLoaded = true;
+            console.log('✅ Dashboard initialization completed');
+            
+            // Ensure timers are started after successful authentication
+            if (!isTimersActive && currentWorker) {
+                console.log('🔄 Starting timers after successful dashboard initialization...');
+                startSessionTimers();
+            }
+         }
+
+         // Load worker alerts
+         async function loadWorkerAlerts() {
+             try {
+                 console.log('Loading alerts for worker:', currentWorker.uid);
+                 
+                 // Query alerts where worker is in recipients array
+                 const q = window.query(
+                     window.collection(window.db, "alerts"),
+                     window.where("recipients", "array-contains", currentWorker.uid)
+                 );
+                 
+                 const querySnapshot = await window.getDocs(q);
+                 console.log('Alerts query completed, found', querySnapshot.size, 'alerts');
+                 
+                 workerAlerts = [];
+                 
+                 querySnapshot.forEach((doc) => {
+                     const data = doc.data();
+                     workerAlerts.push({
+                         id: doc.id,
+                         ...data
+                     });
+                 });
+
+                 // Sort alerts by creation date (newest first)
+                 workerAlerts.sort((a, b) => {
+                     const dateA = a.sentAt?.toDate?.() || a.createdAt?.toDate?.() || new Date(0);
+                     const dateB = b.sentAt?.toDate?.() || b.createdAt?.toDate?.() || new Date(0);
+                     return dateB - dateA;
+                 });
+
+                 displayAlerts();
+                 
+             } catch (error) {
+                 console.error('Error loading alerts:', error);
+                 
+                 let errorMessage = 'Error loading alerts';
+                 
+                 if (error.code === 'permission-denied') {
+                     errorMessage = 'Permission denied. Please check if you are logged in correctly.';
+                 } else if (error.code === 'unavailable') {
+                     errorMessage = 'Firebase service temporarily unavailable. Please try again.';
+                 }
+                 
+                 document.getElementById('alertsList').innerHTML = `
+                     <div style="color: #ff4757; text-align: center; padding: 20px;">
+                         <p><strong>${errorMessage}</strong></p>
+                         <p>Error details: ${error.message}</p>
+                         <button onclick="loadWorkerAlerts()" style="margin-top: 10px; padding: 8px 16px; background: #ef414b; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                             Try Again
+                         </button>
+                     </div>
+                 `;
+             }
+         }
+
+         // Display alerts
+         function displayAlerts() {
+             const alertsList = document.getElementById('alertsList');
+             
+             if (workerAlerts.length === 0) {
+                 alertsList.innerHTML = `
+                     <div class="no-alerts">
+                         <p>📭 No alerts received yet.</p>
+                         <p>Important messages from HR will appear here.</p>
+                     </div>
+                 `;
+                 return;
+             }
+
+             alertsList.innerHTML = workerAlerts.map(alert => `
+                 <div class="alert-card ${alert.isRead ? '' : 'unread'}" id="alert-${alert.id}">
+                     <div class="alert-header">
+                         <div class="alert-type ${alert.type || 'general'}">${getAlertTypeIcon(alert.type)} ${alert.type || 'general'}</div>
+                         <div class="alert-priority ${alert.priority || 'medium'}">${alert.priority || 'medium'}</div>
+                     </div>
+                     <div class="alert-title">${alert.title || 'Untitled Alert'}</div>
+                     <div class="alert-message">${alert.message || 'No message content'}</div>
+                     ${alert.hasPenalty && alert.penaltyApplied ? `
+                         <div style="background: rgba(220, 53, 69, 0.1); border: 1px solid rgba(220, 53, 69, 0.3); border-radius: 8px; padding: 10px; margin: 10px 0;">
+                             <strong style="color: #dc3545;">⚠️ Penalty Applied:</strong> ${alert.penaltyApplied > 0 ? 'Deduction' : 'Bonus'} of ${Math.abs(alert.penaltyApplied)} day(s)
+                         </div>
+                     ` : ''}
+                     <div class="alert-meta">
+                         <div class="alert-date">${formatAlertDate(alert.sentAt || alert.createdAt)}</div>
+                         <div class="alert-sender">From: ${alert.sentBy || 'HR'}</div>
+                     </div>
+                     ${!alert.isRead ? `
+                         <div class="alert-actions">
+                             <button class="alert-btn mark-read" onclick="markAlertAsRead('${alert.id}')">
+                                 ✓ Mark as Read
+                             </button>
+                         </div>
+                     ` : ''}
+                 </div>
+             `).join('');
+         }
+
+         // Helper function to get alert type icon
+         function getAlertTypeIcon(type) {
+             const icons = {
+                 'attendance': '⏰',
+                 'performance': '📊',
+                 'schedule': '📅',
+                 'policy': '📋',
+                 'general': '📢',
+                 'urgent': '🚨'
+             };
+             return icons[type] || '📢';
+         }
+
+         // Helper function to format alert date
+         function formatAlertDate(timestamp) {
+             if (!timestamp) return 'Unknown date';
+             
+             const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+             const now = new Date();
+             const diffTime = Math.abs(now - date);
+             const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+             
+             if (diffDays === 0) {
+                 return 'Today at ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+             } else if (diffDays === 1) {
+                 return 'Yesterday at ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+             } else if (diffDays < 7) {
+                 return diffDays + ' days ago';
+             } else {
+                 return date.toLocaleDateString();
+             }
+         }
+
+         // Mark alert as read
+         async function markAlertAsRead(alertId) {
+             try {
+                 // Note: This function would need to update the alert document
+                 // For now, we'll just update the local display
+                 const alert = workerAlerts.find(a => a.id === alertId);
+                 if (alert) {
+                     alert.isRead = true;
+                     displayAlerts(); // Refresh display
+                     console.log('Alert marked as read:', alertId);
+                 }
+             } catch (error) {
+                 console.error('Error marking alert as read:', error);
+             }
+         }
+
+         // Load worker exceptions
+         async function loadWorkerExceptions() {
+             try {
+                 console.log('Loading exceptions for worker:', currentWorker.uid);
+                 
+                                 const q = window.query(
+                    window.collection(window.db, "exceptionRequests"),
+                    window.where("workerId", "==", currentWorker.uid),
+                    window.orderBy("createdAt", "desc")
+                );
+                 
+                 const querySnapshot = await window.getDocs(q);
+                 console.log('Exceptions query completed, found', querySnapshot.size, 'exceptions');
+                 
+                 workerExceptions = [];
+                 
+                 querySnapshot.forEach((doc) => {
+                     const data = doc.data();
+                     workerExceptions.push({
+                         id: doc.id,
+                         ...data
+                     });
+                 });
+
+                 displayExceptions();
+                 
+             } catch (error) {
+                 console.error('Error loading exceptions:', error);
+                 
+                 let errorMessage = 'Error loading exceptions';
+                 
+                 if (error.code === 'permission-denied') {
+                     errorMessage = 'Permission denied. Please check if you are logged in correctly.';
+                 } else if (error.code === 'unavailable') {
+                     errorMessage = 'Firebase service temporarily unavailable. Please try again.';
+                 }
+                 
+                 document.getElementById('exceptionHistoryList').innerHTML = `
+                     <div style="color: #ff4757; text-align: center; padding: 20px;">
+                         <p><strong>${errorMessage}</strong></p>
+                         <p>Error details: ${error.message}</p>
+                         <button onclick="loadWorkerExceptions()" style="margin-top: 10px; padding: 8px 16px; background: #ef414b; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                             Try Again
+                         </button>
+                     </div>
+                 `;
+             }
+         }
+
+         // Display exceptions
+         function displayExceptions() {
+             const exceptionHistoryList = document.getElementById('exceptionHistoryList');
+             
+             if (workerExceptions.length === 0) {
+                 exceptionHistoryList.innerHTML = `
+                     <div class="no-exceptions">
+                         <p>No exceptions submitted yet.</p>
+                         <p>Your submitted exceptions will appear here.</p>
+                     </div>
+                 `;
+                 return;
+             }
+
+             exceptionHistoryList.innerHTML = workerExceptions.map(exception => `
+                 <div class="exception-card">
+                     <div class="exception-header-info">
+                         <div class="exception-type">
+                             ${exception.type === 'late' ? '🚨 Late Arrival' : '❌ Absent for the Day'}
+                             ${exception.type === 'late' && exception.lateMinutes ? ` (${exception.lateMinutes} minutes)` : ''}
+                         </div>
+                         <div class="exception-status status-${exception.status || 'pending'}">
+                             ${(exception.status || 'pending').toUpperCase()}
+                         </div>
+                     </div>
+                     <div class="exception-details">
+                         <strong>Reason:</strong> ${exception.reason || 'No reason provided'}<br>
+                         ${exception.supportingEvidence ? `<strong>Supporting Evidence:</strong> ${exception.supportingEvidence}<br>` : ''}
+                         ${exception.adminResponse ? `<strong>Admin Response:</strong> ${exception.adminResponse}<br>` : ''}
+                     </div>
+                     <div class="exception-meta">
+                         <div><strong>Date:</strong> ${exception.exceptionDate ? new Date(exception.exceptionDate).toLocaleDateString() : 'N/A'}</div>
+                         <div><strong>Submitted:</strong> ${exception.createdAt ? new Date(exception.createdAt.toDate()).toLocaleDateString() + ' ' + new Date(exception.createdAt.toDate()).toLocaleTimeString() : 'N/A'}</div>
+                         ${exception.reviewedAt ? `<div><strong>Reviewed:</strong> ${new Date(exception.reviewedAt.toDate()).toLocaleDateString() + ' ' + new Date(exception.reviewedAt.toDate()).toLocaleTimeString()}</div>` : ''}
+                     </div>
+                 </div>
+             `).join('');
+         }
+
+         // Handle exception form submission
+         async function submitException(event) {
+             event.preventDefault();
+             
+             const formData = new FormData(event.target);
+             const exceptionData = {
+                 type: formData.get('exceptionType'),
+                 lateMinutes: formData.get('lateMinutes') ? parseInt(formData.get('lateMinutes')) : null,
+                 exceptionDate: formData.get('exceptionDate'),
+                 reason: formData.get('exceptionReason'),
+                 supportingEvidence: formData.get('supportingEvidence') || null
+             };
+
+             // Validation
+             if (exceptionData.type === 'late' && (!exceptionData.lateMinutes || exceptionData.lateMinutes < 30 || exceptionData.lateMinutes > 120)) {
+                 alert('For late arrival, please enter minutes between 30 and 120.');
+                 return;
+             }
+
+             if (!exceptionData.reason.trim()) {
+                 alert('Please provide a reason for your exception.');
+                 return;
+             }
+
+             try {
+                                 // Submit exception to Firebase
+                const exceptionDoc = await window.addDoc(window.collection(window.db, "exceptionRequests"), {
+                     workerId: currentWorker.uid,
+                     workerName: `${currentWorker.firstName} ${currentWorker.lastName}`,
+                     workerEmail: currentWorker.email,
+                     type: exceptionData.type,
+                     lateMinutes: exceptionData.lateMinutes,
+                     exceptionDate: exceptionData.exceptionDate,
+                     reason: exceptionData.reason.trim(),
+                     supportingEvidence: exceptionData.supportingEvidence,
+                     status: 'pending',
+                     createdAt: window.serverTimestamp()
+                 });
+
+                 console.log('Exception submitted successfully:', exceptionDoc.id);
+
+                 // Add to local array
+                 workerExceptions.unshift({
+                     id: exceptionDoc.id,
+                     workerId: currentWorker.uid,
+                     workerName: `${currentWorker.firstName} ${currentWorker.lastName}`,
+                     workerEmail: currentWorker.email,
+                     type: exceptionData.type,
+                     lateMinutes: exceptionData.lateMinutes,
+                     exceptionDate: exceptionData.exceptionDate,
+                     reason: exceptionData.reason.trim(),
+                     supportingEvidence: exceptionData.supportingEvidence,
+                     status: 'pending',
+                     createdAt: new Date()
+                 });
+
+                 // Update display
+                 displayExceptions();
+
+                 // Clear form
+                 clearExceptionForm();
+
+                 alert('Exception submitted successfully! Admin will review your request.');
+
+             } catch (error) {
+                 console.error('Error submitting exception:', error);
+                 alert('Error submitting exception. Please try again.');
+             }
+         }
+
+         // Clear exception form
+         function clearExceptionForm() {
+             document.getElementById('exceptionForm').reset();
+             document.getElementById('lateMinutesGroup').style.display = 'none';
+         }
+
+         // Handle exception type change
+         function handleExceptionTypeChange() {
+             const exceptionType = document.getElementById('exceptionType').value;
+             const lateMinutesGroup = document.getElementById('lateMinutesGroup');
+             const lateMinutesInput = document.getElementById('lateMinutes');
+
+             if (exceptionType === 'late') {
+                 lateMinutesGroup.style.display = 'flex';
+                 lateMinutesInput.required = true;
+             } else {
+                 lateMinutesGroup.style.display = 'none';
+                 lateMinutesInput.required = false;
+                 lateMinutesInput.value = '';
+             }
+         }
+
+                 // Edit expected salary
+         function editExpectedSalary() {
+             document.getElementById('expectedSalaryDisplay').style.display = 'none';
+             document.getElementById('expectedSalaryEditForm').style.display = 'block';
+             document.getElementById('expectedSalaryInput').focus();
+         }
+
+         // Save expected salary
+         async function saveExpectedSalary() {
+             const newSalary = parseFloat(document.getElementById('expectedSalaryInput').value);
+             
+             if (!newSalary || newSalary < 0) {
+                 alert('Please enter a valid salary amount.');
+                 return;
+             }
+
+             try {
+                 await window.updateDoc(window.doc(window.db, "workers", currentWorker.uid), {
+                     expectedSalary: newSalary
+                 });
+
+                 // Update local data
+                 currentWorker.expectedSalary = newSalary;
+                 
+                 // Update display
+                 document.getElementById('expectedSalaryDisplay').textContent = `EGP ${newSalary}`;
+                 document.getElementById('expectedSalaryDisplay').style.display = 'inline';
+                 document.getElementById('expectedSalaryEditForm').style.display = 'none';
+                 
+                 alert('Expected salary updated successfully!');
+             } catch (error) {
+                 console.error('Error updating expected salary:', error);
+                 alert('Error updating expected salary. Please try again.');
+             }
+         }
+
+         // Cancel editing expected salary
+         function cancelEditExpectedSalary() {
+             document.getElementById('expectedSalaryInput').value = currentWorker.expectedSalary || '';
+             document.getElementById('expectedSalaryDisplay').style.display = 'inline';
+             document.getElementById('expectedSalaryEditForm').style.display = 'none';
+         }
+
+         // Check session timeout
+         function checkSessionTimeout() {
+             const loginTime = localStorage.getItem('workerLoginTime');
+             if (loginTime) {
+                 const loginDate = new Date(loginTime);
+                 const currentDate = new Date();
+                 const timeDiff = currentDate.getTime() - loginDate.getTime();
+                 const hoursDiff = timeDiff / (1000 * 60 * 60);
+                 
+                 if (hoursDiff > 8) {
+                     alert('Your session has expired. Please login again.');
+                     logout();
+                     return false;
+                 }
+             }
+             return true;
+         }
+
+         // Start session timers
+         function startSessionTimers() {
+             if (isTimersActive) {
+                 console.log('⚠️ Timers already active, skipping start');
+                 return;
+             }
+             
+             console.log('▶️ Starting session timers...');
+             
+             // Start session duration update timer (every second)
+             sessionUpdateTimer = setInterval(() => {
+                 if (isTimersActive) {
+                     updateSessionDuration();
+                 }
+             }, 1000);
+             
+             // Start session timeout check timer (every 5 minutes)
+             sessionTimeoutTimer = setInterval(() => {
+                 if (isTimersActive && !checkSessionTimeout()) {
+                     window.location.href = 'index.html';
+                 }
+             }, 5 * 60 * 1000);
+             
+             isTimersActive = true;
+             console.log('✅ Session timers started');
+         }
+
+         // Stop session timers
+         function stopSessionTimers() {
+             if (!isTimersActive) {
+                 console.log('⚠️ Timers already stopped, skipping stop');
+                 return;
+             }
+             
+             console.log('⏹️ Stopping session timers...');
+             
+             if (sessionUpdateTimer) {
+                 clearInterval(sessionUpdateTimer);
+                 sessionUpdateTimer = null;
+             }
+             
+             if (sessionTimeoutTimer) {
+                 clearInterval(sessionTimeoutTimer);
+                 sessionTimeoutTimer = null;
+             }
+             
+             isTimersActive = false;
+             console.log('✅ Session timers stopped');
+         }
+
+         // Update session duration with safety checks
+         function updateSessionDuration() {
+             // Safety check: only update if user is authenticated and page is loaded
+             const isAuthenticated = localStorage.getItem('workerAuthenticated');
+             if (isAuthenticated !== 'true' || !pageFullyLoaded || !currentWorker) {
+                 console.log('⚠️ Skipping session update - user not authenticated or page not loaded');
+                 return;
+             }
+             
+             const loginTime = localStorage.getItem('workerLoginTime');
+             if (loginTime) {
+                 const loginDate = new Date(loginTime);
+                 const now = new Date();
+                 const duration = now - loginDate;
+                 
+                 const hours = Math.floor(duration / (1000 * 60 * 60));
+                 const minutes = Math.floor((duration % (1000 * 60 * 60)) / (1000 * 60));
+                 const seconds = Math.floor((duration % (1000 * 60)) / 1000);
+                 
+                 const sessionDuration = `${hours}h ${minutes}m ${seconds}s`;
+                 
+                 // Safely update DOM elements
+                 const sessionDurationElement = document.getElementById('sessionDuration');
+                 const headerSessionTimeElement = document.getElementById('headerSessionTime');
+                 
+                 if (sessionDurationElement) {
+                     sessionDurationElement.textContent = sessionDuration;
+                 }
+                 
+                 if (headerSessionTimeElement) {
+                     const loginTimeString = loginDate.toLocaleTimeString();
+                     headerSessionTimeElement.textContent = `🕐 ${loginTimeString} (${sessionDuration})`;
+                 }
+                 
+                 // Update work session periodically (only if session is active)
+                 if (currentWorkSession && currentWorkSession.isActive) {
+                     updateWorkSessionInFirebase();
+                 }
+             } else {
+                 // Clear display if no login time
+                 const sessionDurationElement = document.getElementById('sessionDuration');
+                 const headerSessionTimeElement = document.getElementById('headerSessionTime');
+                 
+                 if (sessionDurationElement) {
+                     sessionDurationElement.textContent = 'Session time unavailable';
+                 }
+                 
+                 if (headerSessionTimeElement) {
+                     headerSessionTimeElement.textContent = '🕐 Session time unavailable';
+                 }
+             }
+         }
+
+        // Initialize when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            initDashboard();
+            
+            // Add event listeners for exception form
+            document.getElementById('exceptionForm').addEventListener('submit', submitException);
+            document.getElementById('exceptionType').addEventListener('change', handleExceptionTypeChange);
+            
+            // Set default date to today
+            document.getElementById('exceptionDate').value = new Date().toISOString().split('T')[0];
+            
+            // Start session timers after page loads
+            console.log('📍 Page loaded, starting session timers...');
+            startSessionTimers();
+            
+            // Handle page unload to record logout time and stop timers
+            window.addEventListener('beforeunload', async function(event) {
+                console.log('🚪 Page unloading, stopping timers and ending session...');
+                
+                // CRITICAL: Stop timers immediately
+                stopSessionTimers();
+                
+                const isAuthenticated = localStorage.getItem('workerAuthenticated');
+                if (isAuthenticated === 'true' && currentWorker && currentWorker.uid && pageFullyLoaded) {
+                    try {
+                        console.log('Setting worker offline due to page unload');
+                        
+                        // End work session
+                        await endWorkSession();
+                        
+                        await window.updateDoc(window.doc(window.db, "workers", currentWorker.uid), {
+                            lastLogout: window.serverTimestamp(),
+                            isOnline: false
+                        });
+                        
+                        // Clear global state
+                        currentWorkSession = null;
+                        currentWorker = null;
+                        pageFullyLoaded = false;
+                        
+                    } catch (error) {
+                        console.error('Error recording logout time:', error);
+                    }
+                }
+            });
+            
+            // Handle page visibility change (when user switches tabs or minimizes)
+            document.addEventListener('visibilitychange', function() {
+                if (document.hidden) {
+                    console.log('📱 Page hidden, timers continue running...');
+                    // Timers continue for brief tab switches
+                } else {
+                    console.log('👁️ Page visible again, timers active...');
+                    // Ensure timers are still active
+                    if (!isTimersActive && currentWorker) {
+                        console.log('🔄 Restarting timers after visibility change...');
+                        startSessionTimers();
+                    }
+                }
+            });
+        });
+    </script>
+</body>
+</html> 
