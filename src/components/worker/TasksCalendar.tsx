@@ -7,7 +7,7 @@ type Props = {
   onSelectDate: (d: Date | null) => void;
 };
 
-const DAY_NAMES = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 export default function TasksCalendar({ tasks, selectedDate, onSelectDate }: Props) {
   // Use selectedDate for current month view, or fallback to today
@@ -40,19 +40,22 @@ export default function TasksCalendar({ tasks, selectedDate, onSelectDate }: Pro
     let startOffset = firstDay.getDay() - 1;
     if (startOffset < 0) startOffset = 6; // Sunday becomes 6
 
-    const cells: { date: Date | null; isCurrentMonth: boolean; hasTask: boolean }[] = [];
+    const cells: { date: Date | null; isCurrentMonth: boolean; hasTask: boolean; isToday: boolean }[] = [];
+    const today = new Date();
 
     // Padding before
     for (let i = 0; i < startOffset; i++) {
         const d = new Date(year, month, 1 - (startOffset - i));
-        cells.push({ date: d, isCurrentMonth: false, hasTask: false });
+        const isToday = d.toDateString() === today.toDateString();
+        cells.push({ date: d, isCurrentMonth: false, hasTask: false, isToday });
     }
 
     // Actual days
     for (let i = 1; i <= lastDay.getDate(); i++) {
       const d = new Date(year, month, i);
       const key = `${year}-${month}-${i}`;
-      cells.push({ date: d, isCurrentMonth: true, hasTask: datesWithTasks.has(key) });
+      const isToday = d.toDateString() === today.toDateString();
+      cells.push({ date: d, isCurrentMonth: true, hasTask: datesWithTasks.has(key), isToday });
     }
 
     // Padding after to complete rows (7 cols)
@@ -61,7 +64,8 @@ export default function TasksCalendar({ tasks, selectedDate, onSelectDate }: Pro
         const toAdd = 7 - remainder;
         for (let i = 1; i <= toAdd; i++) {
             const d = new Date(year, month + 1, i);
-            cells.push({ date: d, isCurrentMonth: false, hasTask: false });
+            const isToday = d.toDateString() === today.toDateString();
+            cells.push({ date: d, isCurrentMonth: false, hasTask: false, isToday });
         }
     }
 
@@ -72,33 +76,50 @@ export default function TasksCalendar({ tasks, selectedDate, onSelectDate }: Pro
   const nextMonth = () => setViewMonth(new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 1));
 
   return (
-    <div className="brutal-card p-6 flex flex-col mb-4">
+    <div className="ui-card p-6 flex flex-col mb-4">
       {/* Header */}
-      <div className="flex justify-between items-center mb-6">
-        <button onClick={prevMonth} className="text-white hover:text-[#FF5500] font-mono mx-2">
-          &lt; PREV
+      <div className="flex justify-between items-center mb-5 pb-4 border-b border-[var(--mft-border)]">
+        <button 
+          onClick={prevMonth} 
+          className="p-2 rounded-lg border border-[var(--mft-border)] text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors flex items-center gap-1 text-xs font-semibold"
+          title="Previous Month"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+          </svg>
+          <span className="hidden sm:inline">Prev</span>
         </button>
-        <span className="font-oswald text-xl tracking-widest uppercase text-[#FF5500]">
-          {viewMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}
-        </span>
-        <button onClick={nextMonth} className="text-white hover:text-[#FF5500] font-mono mx-2">
-          NEXT &gt;
+        <div className="text-center">
+          <span className="font-heading font-semibold text-lg text-zinc-900 dark:text-zinc-100">
+            {viewMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}
+          </span>
+          <p className="text-[11px] text-zinc-500 font-mono uppercase tracking-wider">Task Due Dates</p>
+        </div>
+        <button 
+          onClick={nextMonth} 
+          className="p-2 rounded-lg border border-[var(--mft-border)] text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors flex items-center gap-1 text-xs font-semibold"
+          title="Next Month"
+        >
+          <span className="hidden sm:inline">Next</span>
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
         </button>
       </div>
 
       {/* Days Row */}
-      <div className="grid grid-cols-7 mb-4">
+      <div className="grid grid-cols-7 mb-2">
         {DAY_NAMES.map(name => (
-          <div key={name} className="text-center font-mono text-xs font-bold text-[#666666] tracking-widest">
+          <div key={name} className="text-center font-mono text-[11px] font-semibold text-zinc-500 uppercase tracking-wider py-1">
             {name}
           </div>
         ))}
       </div>
 
       {/* Grid */}
-      <div className="grid grid-cols-7 gap-y-4 gap-x-2 relative">
+      <div className="grid grid-cols-7 gap-y-2 gap-x-1 sm:gap-x-2 relative">
         {daysInGrid.map((bgDay, i) => {
-            const { date, isCurrentMonth, hasTask } = bgDay;
+            const { date, isCurrentMonth, hasTask, isToday } = bgDay;
             if (!date) return <div key={i} />
 
             // Is selected?
@@ -106,26 +127,27 @@ export default function TasksCalendar({ tasks, selectedDate, onSelectDate }: Pro
                                selectedDate.getMonth() === date.getMonth() &&
                                selectedDate.getDate() === date.getDate();
 
-            
             return (
-                <div key={i} className="flex flex-col items-center min-h-[48px]">
+                <div key={i} className="flex flex-col items-center min-h-[52px]">
                     <button 
                         onClick={() => onSelectDate(isSelected ? null : date)}
                         className={`
-                            relative w-10 h-10 flex items-center justify-center font-mono text-sm leading-none bg-transparent hover:bg-[#333333] transition-colors
-                            ${isSelected ? "bg-[#FF5500] hover:bg-[#FF5500] text-black font-bold outline-none ring-2 ring-white ring-offset-2 ring-offset-black" : "text-white"}
-                            ${!isCurrentMonth && !isSelected ? "opacity-30" : ""}
+                            relative w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center font-mono text-xs sm:text-sm font-medium transition-all duration-150
+                            ${isSelected 
+                              ? "bg-red-600 text-white font-bold shadow-md shadow-red-600/30 ring-2 ring-red-500/40 scale-105" 
+                              : isToday
+                                ? "bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 font-bold border border-red-500/30 hover:bg-red-100 dark:hover:bg-red-950/70"
+                                : "text-zinc-800 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800/80"
+                            }
+                            ${!isCurrentMonth && !isSelected ? "opacity-35" : ""}
                         `}
-                        style={{
-                            borderRadius: isSelected ? '8px' : '0px'
-                        }}
                     >
                         {date.getDate()}
                     </button>
                     {/* Activity Dot underneath */}
                     <div className="h-2 w-full flex justify-center mt-1">
                         {hasTask && (
-                            <div className={`w-1.5 h-1.5 rounded-full ${isSelected ? "bg-white" : "bg-[#FF5500]"}`} />
+                            <div className={`w-1.5 h-1.5 rounded-full ${isSelected ? "bg-red-600" : "bg-red-500 dark:bg-red-400"} animate-pulse`} />
                         )}
                     </div>
                 </div>
@@ -133,18 +155,21 @@ export default function TasksCalendar({ tasks, selectedDate, onSelectDate }: Pro
         })}
       </div>
       
-      {/* Clear Action (optional context) */}
-      <div className="mt-4 flex justify-between items-center">
-        <span className="font-mono text-xs text-[#666666] uppercase">
-             {selectedDate ? "FILTERING BY DATE" : "SHOWING ALL"}
+      {/* Clear Action */}
+      <div className="mt-4 pt-3 border-t border-[var(--mft-border)] flex justify-between items-center text-xs">
+        <span className="font-mono text-zinc-500 flex items-center gap-1.5">
+          <span className={`w-2 h-2 rounded-full ${selectedDate ? "bg-red-500" : "bg-zinc-400"}`} />
+          {selectedDate ? `Filtering: ${selectedDate.toLocaleDateString()}` : "Showing all deadlines"}
         </span>
         {selectedDate && (
-            <button onClick={() => onSelectDate(null)} className="font-mono text-xs text-white underline hover:text-[#FF5500]">
-                CLEAR FILTER
-            </button>
+          <button 
+            onClick={() => onSelectDate(null)} 
+            className="text-red-600 dark:text-red-400 font-semibold hover:underline flex items-center gap-1"
+          >
+            Clear Filter
+          </button>
         )}
       </div>
-
     </div>
   );
 }

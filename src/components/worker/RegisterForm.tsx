@@ -27,11 +27,9 @@ function passwordStrength(password: string): { score: number; ok: boolean; label
   else feedback.push("symbol");
 
   if (score < 3) return { score, ok: false, label: `Weak — add: ${feedback.join(", ")}`, color: "bg-red-500" };
-  if (score < 5) return { score, ok: true, label: "Medium — good enough to continue", color: "bg-amber-500" };
+  if (score < 5) return { score, ok: true, label: "Medium password strength", color: "bg-amber-500" };
   return { score, ok: true, label: "Strong password", color: "bg-emerald-500" };
 }
-
-const inputClass = "brutal-input";
 
 export default function RegisterForm() {
   const router = useRouter();
@@ -73,16 +71,16 @@ export default function RegisterForm() {
 
   function validateStep(s: Step): string | null {
     if (s === 0) {
-      if (!firstName.trim() || !lastName.trim() || !email.trim() || !phone.trim()) return "Fill in all fields.";
-      if (phone.replace(/\D/g, "").length < 10) return "Enter a valid phone number.";
+      if (!firstName.trim() || !lastName.trim() || !email.trim() || !phone.trim()) return "Please fill in all personal contact fields.";
+      if (phone.replace(/\D/g, "").length < 10) return "Please enter a valid phone number (at least 10 digits).";
     }
     if (s === 1) {
       if (!role || !experience || !department || !employmentType || !expectedSalary || !government.trim() || !city.trim()) {
-        return "Fill in all required work fields.";
+        return "Please fill in all required professional profile fields.";
       }
-      if (role === "other" && !customRole.trim()) return "Specify your custom role.";
+      if (role === "other" && !customRole.trim()) return "Please specify your custom role.";
       const sal = parseFloat(expectedSalary);
-      if (!sal || sal < 0) return "Enter a valid expected salary.";
+      if (!sal || sal < 0) return "Please enter a valid expected salary amount.";
     }
     return null;
   }
@@ -117,7 +115,7 @@ export default function RegisterForm() {
       return;
     }
     if (!pwMeta.ok) {
-      setError("Password is too weak.");
+      setError("Password is too weak. Please include at least 8 characters with numbers and symbols.");
       return;
     }
 
@@ -165,9 +163,11 @@ export default function RegisterForm() {
         performanceNotes: [],
       });
 
-      sessionStorage.setItem("workerLoginTime", new Date().toISOString());
-      setSuccess("Registration successful! Redirecting to dashboard…");
-      window.setTimeout(() => router.push("/dashboard"), 1500);
+      sessionStorage.removeItem("workerLoginTime");
+      sessionStorage.removeItem("workerShiftMode");
+      sessionStorage.removeItem("workerOvertimeMinutes");
+      setSuccess("Registration submitted! Redirecting to your dashboard…");
+      window.setTimeout(() => router.push("/dashboard"), 1200);
     } catch (err: unknown) {
       const code = err && typeof err === "object" && "code" in err ? String((err as { code: string }).code) : "";
       setError(mapAuthError(code, "Registration failed."));
@@ -176,72 +176,107 @@ export default function RegisterForm() {
     }
   }
 
-  const steps = ["About you", "Work profile", "Security"];
+  const steps = ["Personal Info", "Work Profile", "Security"];
 
   return (
-    <WorkerAuthShell variant="wide">
-      <div aria-live="polite" aria-atomic="true" className="sr-only">
-        {error ? error : success ? success : `Step ${step + 1} of 3`}
-      </div>
-
-      <div className="mb-8">
-        <h2 className="text-3xl font-oswald text-[var(--mft-primary)] mb-1">AUTH.JOIN</h2>
-        <p className="text-xs uppercase tracking-widest text-[var(--mft-muted)]">
-          Submit clearance packet
+    <WorkerAuthShell
+      variant="wide"
+      footer={
+        <p>
+          Already registered?{" "}
+          <Link href="/" className="font-semibold text-red-600 hover:text-red-700 hover:underline">
+            Sign in to your account
+          </Link>
+        </p>
+      }
+    >
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold tracking-tight text-zinc-900 dark:text-white">
+          Worker Registration
+        </h1>
+        <p className="mt-1 text-xs text-zinc-500">
+          Create your worker account to receive project task assignments and track your attendance.
         </p>
       </div>
 
-      {/* Progress */}
-      <div className="mt-8 mb-6 flex items-center justify-between border-b border-[var(--mft-border)] pb-4">
+      {/* Stepper Indicator */}
+      <div className="mb-6 flex items-center justify-between border-b border-zinc-200 pb-4 dark:border-zinc-800">
         {steps.map((label, i) => (
-          <div key={label} className="flex flex-col items-center gap-2 flex-1">
-            <div
-              className={`flex h-8 w-8 items-center justify-center text-xs font-bold border ${
+          <div key={label} className="flex items-center gap-2">
+            <span
+              className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold transition-all ${
                 i === step
-                  ? "bg-[var(--mft-primary)] text-black border-[var(--mft-primary)]"
+                  ? "bg-red-600 text-white shadow-sm shadow-red-900/30"
                   : i < step
-                    ? "bg-white text-black border-white"
-                    : "bg-transparent text-[var(--mft-border)] border-[var(--mft-border)]"
+                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400"
+                  : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800"
               }`}
             >
               {i < step ? "✓" : i + 1}
-            </div>
-            <span className={`hidden text-center text-[10px] font-bold uppercase tracking-wider md:block ${i === step ? "text-[var(--mft-primary)]" : "text-[var(--mft-muted)]"}`}>
+            </span>
+            <span className={`text-xs font-semibold hidden sm:inline ${i === step ? "text-zinc-900 dark:text-white" : "text-zinc-400"}`}>
               {label}
             </span>
           </div>
         ))}
       </div>
 
-      {error ? (
-        <div role="alert" className="mt-6 rounded-xl border border-red-500/40 bg-red-950/50 px-4 py-3 text-sm text-red-100">
-          {error}
+      {error && (
+        <div className="mb-4 flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300 animate-fade-in">
+          <svg className="h-4 w-4 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+          </svg>
+          <div className="min-w-0 flex-1">{error}</div>
         </div>
-      ) : null}
-      {success ? (
-        <div role="status" className="mt-6 rounded-xl border border-emerald-500/40 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-100">
-          {success}
-        </div>
-      ) : null}
+      )}
 
-      <form className="mt-8 space-y-5" onSubmit={step === 2 ? onSubmit : (e) => e.preventDefault()}>
-        {step === 0 ? (
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="firstName">
-                First name *
-              </label>
-              <input id="firstName" value={firstName} onChange={(e) => setFirstName(e.target.value)} required className={inputClass} autoComplete="given-name" />
+      {success && (
+        <div className="mb-4 flex items-start gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300 animate-fade-in">
+          <svg className="h-4 w-4 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+          </svg>
+          <div className="min-w-0 flex-1">{success}</div>
+        </div>
+      )}
+
+      <form onSubmit={step === 2 ? onSubmit : (e) => e.preventDefault()} noValidate>
+        {/* Step 0: Personal Info */}
+        {step === 0 && (
+          <div className="space-y-4 animate-fade-in">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="firstName">
+                  First Name *
+                </label>
+                <input
+                  id="firstName"
+                  value={firstName}
+                  onChange={(e) => setFirstName(e.target.value)}
+                  required
+                  placeholder="John"
+                  className="brutal-input"
+                  autoComplete="given-name"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="lastName">
+                  Last Name *
+                </label>
+                <input
+                  id="lastName"
+                  value={lastName}
+                  onChange={(e) => setLastName(e.target.value)}
+                  required
+                  placeholder="Doe"
+                  className="brutal-input"
+                  autoComplete="family-name"
+                />
+              </div>
             </div>
+
             <div>
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="lastName">
-                Last name *
-              </label>
-              <input id="lastName" value={lastName} onChange={(e) => setLastName(e.target.value)} required className={inputClass} autoComplete="family-name" />
-            </div>
-            <div className="sm:col-span-2">
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="email">
-                Email *
+              <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="email">
+                Email Address *
               </label>
               <input
                 id="email"
@@ -249,236 +284,314 @@ export default function RegisterForm() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
-                className={inputClass}
+                placeholder="john.doe@example.com"
+                className="brutal-input"
                 autoComplete="email"
               />
             </div>
-            <div className="sm:col-span-2">
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="phone">
-                Phone *
+
+            <div>
+              <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="phone">
+                Phone Number (WhatsApp) *
               </label>
-              <input id="phone" type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} required className={inputClass} autoComplete="tel" />
+              <input
+                id="phone"
+                type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                required
+                placeholder="+20 100 000 0000"
+                className="brutal-input"
+                autoComplete="tel"
+              />
             </div>
           </div>
-        ) : null}
+        )}
 
-        {step === 1 ? (
-          <div className="grid max-h-[55vh] gap-4 overflow-y-auto pr-1 sm:grid-cols-2 sm:max-h-none">
-            <div className="sm:col-span-2">
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="role">
-                Role *
-              </label>
-              <select id="role" value={role} onChange={(e) => setRole(e.target.value)} required className={inputClass}>
-                <option value="">Select your role</option>
-                <option value="media-buyer">Media Buyer</option>
-                <option value="photo-editor">Photo editor</option>
-                <option value="retoucher">Retoucher</option>
-                <option value="reelmaker">Reelmaker</option>
-                <option value="graphic-designer">Graphic Designer</option>
-                <option value="web-developer">Web Developer</option>
-                <option value="content-writer">Content Writer</option>
-                <option value="social-media-manager">Social Media Manager</option>
-                <option value="seo-specialist">SEO Specialist</option>
-                <option value="video-editor">Video Editor</option>
-                <option value="photographer">Photographer</option>
-                <option value="project-manager">Project Manager</option>
-                <option value="account-manager">Account Manager</option>
-                <option value="other">Other</option>
-              </select>
+        {/* Step 1: Work Profile */}
+        {step === 1 && (
+          <div className="space-y-4 animate-fade-in">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="department">
+                  Department *
+                </label>
+                <select
+                  id="department"
+                  value={department}
+                  onChange={(e) => setDepartment(e.target.value)}
+                  required
+                  className="brutal-input"
+                >
+                  <option value="">Select department</option>
+                  <option value="web-development">Web Development</option>
+                  <option value="social-media">Social Media</option>
+                  <option value="media-buying">Media Buying</option>
+                  <option value="branding">Branding &amp; Design</option>
+                  <option value="content-creation">Content Creation</option>
+                  <option value="seo">SEO</option>
+                  <option value="general">General</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="role">
+                  Role Title *
+                </label>
+                <select
+                  id="role"
+                  value={role}
+                  onChange={(e) => setRole(e.target.value)}
+                  required
+                  className="brutal-input"
+                >
+                  <option value="">Select role</option>
+                  <option value="frontend-dev">Frontend Developer</option>
+                  <option value="backend-dev">Backend Developer</option>
+                  <option value="fullstack-dev">Fullstack Developer</option>
+                  <option value="ui-ux-designer">UI/UX Designer</option>
+                  <option value="graphic-designer">Graphic Designer</option>
+                  <option value="media-buyer">Media Buyer</option>
+                  <option value="content-creator">Content Creator</option>
+                  <option value="project-manager">Project Manager</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
             </div>
-            {role === "other" ? (
-              <div className="sm:col-span-2">
-                <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="customRole">
-                  Custom role *
+
+            {role === "other" && (
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="customRole">
+                  Specify Custom Role *
                 </label>
                 <input
                   id="customRole"
                   value={customRole}
                   onChange={(e) => setCustomRole(e.target.value)}
-                  className={inputClass}
-                  placeholder="Your title"
+                  required
+                  placeholder="e.g. Motion Designer"
+                  className="brutal-input"
                 />
               </div>
-            ) : null}
-            <div className="sm:col-span-2">
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="experience">
-                Years of experience *
-              </label>
-              <select id="experience" value={experience} onChange={(e) => setExperience(e.target.value)} required className={inputClass}>
-                <option value="">Select</option>
-                <option value="0-1">0–1 years</option>
-                <option value="1-3">1–3 years</option>
-                <option value="3-5">3–5 years</option>
-                <option value="5-10">5–10 years</option>
-                <option value="10+">10+ years</option>
-              </select>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="experience">
+                  Experience *
+                </label>
+                <select
+                  id="experience"
+                  value={experience}
+                  onChange={(e) => setExperience(e.target.value)}
+                  required
+                  className="brutal-input"
+                >
+                  <option value="">Select experience</option>
+                  <option value="entry">Entry Level (&lt; 1 yr)</option>
+                  <option value="junior">Junior (1–2 yrs)</option>
+                  <option value="mid">Mid Level (2–4 yrs)</option>
+                  <option value="senior">Senior (4+ yrs)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="employmentType">
+                  Employment Type *
+                </label>
+                <select
+                  id="employmentType"
+                  value={employmentType}
+                  onChange={(e) => setEmploymentType(e.target.value)}
+                  required
+                  className="brutal-input"
+                >
+                  <option value="">Select type</option>
+                  <option value="full-time">Full-Time</option>
+                  <option value="part-time">Part-Time</option>
+                  <option value="contract">Contract</option>
+                  <option value="intern">Internship</option>
+                </select>
+              </div>
             </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="expectedSalary">
+                  Expected Monthly Salary (EGP) *
+                </label>
+                <input
+                  id="expectedSalary"
+                  type="number"
+                  min={0}
+                  step="100"
+                  value={expectedSalary}
+                  onChange={(e) => setExpectedSalary(e.target.value)}
+                  required
+                  placeholder="10000"
+                  className="brutal-input"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="government">
+                  Governorate *
+                </label>
+                <input
+                  id="government"
+                  value={government}
+                  onChange={(e) => setGovernment(e.target.value)}
+                  required
+                  placeholder="Cairo / Giza"
+                  className="brutal-input"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="city">
+                  City / District *
+                </label>
+                <input
+                  id="city"
+                  value={city}
+                  onChange={(e) => setCity(e.target.value)}
+                  required
+                  placeholder="Maadi / Dokki"
+                  className="brutal-input"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="skills">
+                  Key Skills (comma separated)
+                </label>
+                <input
+                  id="skills"
+                  value={skills}
+                  onChange={(e) => setSkills(e.target.value)}
+                  placeholder="React, Figma, Next.js"
+                  className="brutal-input"
+                />
+              </div>
+            </div>
+
             <div>
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="department">
-                Department *
-              </label>
-              <select id="department" value={department} onChange={(e) => setDepartment(e.target.value)} required className={inputClass}>
-                <option value="">Select</option>
-                <option value="development">Development</option>
-                <option value="design">Design</option>
-                <option value="marketing">Marketing</option>
-                <option value="management">Management</option>
-                <option value="general">General</option>
-              </select>
-            </div>
-            <div>
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="employmentType">
-                Work type *
-              </label>
-              <select id="employmentType" value={employmentType} onChange={(e) => setEmploymentType(e.target.value)} required className={inputClass}>
-                <option value="">Select</option>
-                <option value="full-time">Full-time</option>
-                <option value="part-time">Part-time</option>
-                <option value="remotely">Remotely</option>
-              </select>
-            </div>
-            <div className="sm:col-span-2">
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="expectedSalary">
-                Expected monthly salary (EGP) *
+              <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="portfolioLink">
+                Portfolio or GitHub URL (optional)
               </label>
               <input
-                id="expectedSalary"
-                type="number"
-                min={0}
-                step="0.01"
-                value={expectedSalary}
-                onChange={(e) => setExpectedSalary(e.target.value)}
-                required
-                className={inputClass}
-                placeholder="5000"
+                id="portfolioLink"
+                type="url"
+                value={portfolioLink}
+                onChange={(e) => setPortfolioLink(e.target.value)}
+                placeholder="https://behance.net/..."
+                className="brutal-input"
               />
             </div>
-            <div>
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="government">
-                Region / governorate *
-              </label>
-              <input id="government" value={government} onChange={(e) => setGovernment(e.target.value)} required className={inputClass} placeholder="Cairo…" />
-            </div>
-            <div>
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="city">
-                City *
-              </label>
-              <input id="city" value={city} onChange={(e) => setCity(e.target.value)} required className={inputClass} />
-            </div>
-            <div className="sm:col-span-2">
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="skills">
-                Skills (comma-separated)
-              </label>
-              <input id="skills" value={skills} onChange={(e) => setSkills(e.target.value)} className={inputClass} placeholder="Figma, React…" />
-            </div>
-            <div className="sm:col-span-2">
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="portfolioLink">
-                Portfolio URL
-              </label>
-              <input id="portfolioLink" type="url" value={portfolioLink} onChange={(e) => setPortfolioLink(e.target.value)} className={inputClass} />
-            </div>
-            <div className="sm:col-span-2">
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="netspend">
-                Time to leave current job
-              </label>
-              <input id="netspend" value={netspend} onChange={(e) => setNetspend(e.target.value)} className={inputClass} />
-            </div>
           </div>
-        ) : null}
+        )}
 
-        {step === 2 ? (
-          <div className="space-y-5">
+        {/* Step 2: Security & Password */}
+        {step === 2 && (
+          <div className="space-y-4 animate-fade-in">
             <div>
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="password">
-                Password *
-              </label>
-              <div className="relative">
-                <input
-                  id="password"
-                  type={showPw ? "text" : "password"}
-                  autoComplete="new-password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  className={`${inputClass} pr-14`}
-                />
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300" htmlFor="password">
+                  Account Password *
+                </label>
                 <button
                   type="button"
                   onClick={() => setShowPw((s) => !s)}
-                  className="focus-ring absolute right-2 top-1/2 -translate-y-1/2 rounded-lg px-2 py-1 text-xs text-zinc-400 hover:text-white"
+                  className="text-xs text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 cursor-pointer"
                 >
                   {showPw ? "Hide" : "Show"}
                 </button>
               </div>
-              {password ? (
-                <div className="mt-2 space-y-1">
-                  <div className="flex gap-1">
-                    {[1, 2, 3, 4, 5].map((i) => (
-                      <div
-                        key={i}
-                        className={`h-1.5 flex-1 rounded-full transition-colors ${
-                          i <= pwMeta.score ? pwMeta.color : "bg-white/10"
-                        }`}
-                      />
-                    ))}
+              <input
+                id="password"
+                type={showPw ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                placeholder="••••••••"
+                className="brutal-input"
+                autoComplete="new-password"
+              />
+
+              {password && (
+                <div className="mt-2">
+                  <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+                    <div
+                      className={`h-full transition-all duration-300 ${pwMeta.color}`}
+                      style={{ width: `${Math.min(100, (pwMeta.score / 5) * 100)}%` }}
+                    />
                   </div>
-                  <p className={`text-xs ${pwMeta.ok ? "text-zinc-400" : "text-red-300"}`}>{pwMeta.label}</p>
+                  <p className="mt-1 text-[11px] text-zinc-500 font-medium">{pwMeta.label}</p>
                 </div>
-              ) : null}
+              )}
             </div>
+
             <div>
-              <label className="mb-2 block text-xs font-bold uppercase text-[var(--mft-muted)] tracking-wider" htmlFor="confirmPassword">
-                Confirm password *
+              <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="confirm">
+                Confirm Password *
               </label>
               <input
-                id="confirmPassword"
+                id="confirm"
                 type={showPw ? "text" : "password"}
-                autoComplete="new-password"
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
                 required
-                className={inputClass}
+                placeholder="••••••••"
+                className="brutal-input"
+                autoComplete="new-password"
               />
             </div>
-            <p className="text-xs text-zinc-500">
-              By registering you confirm your details are accurate. An admin will review your account before full access.
-            </p>
           </div>
-        ) : null}
+        )}
 
-        <div className="flex flex-col-reverse gap-3 pt-6 border-t border-[var(--mft-border)] sm:flex-row sm:justify-between mt-8">
-          <button
-            type="button"
-            onClick={back}
-            disabled={step === 0 || busy}
-            className="brutal-btn-outline disabled:opacity-40"
-          >
-            [ BACK ]
-          </button>
+        {/* Action Controls */}
+        <div className="mt-6 flex items-center justify-between pt-4 border-t border-zinc-200 dark:border-zinc-800">
+          {step > 0 ? (
+            <button
+              type="button"
+              onClick={back}
+              disabled={busy}
+              className="brutal-btn-outline"
+            >
+              ← Back
+            </button>
+          ) : (
+            <span />
+          )}
+
           {step < 2 ? (
-            <button type="button" onClick={next} className="brutal-btn">
-              [ CONTINUE ]
+            <button
+              type="button"
+              onClick={next}
+              className="brutal-btn"
+            >
+              Continue →
             </button>
           ) : (
             <button
               type="submit"
               disabled={busy}
-              className={`brutal-btn disabled:opacity-50 ${
-                busy ? "worker-btn-loading" : ""
-              }`}
+              className="brutal-btn"
             >
-              {busy ? "[ PROCESSING... ]" : "[ COMMIT PROFILE ]"}
+              {busy ? (
+                <span className="flex items-center gap-2">
+                  <span className="h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  Creating Account…
+                </span>
+              ) : (
+                "Submit Registration"
+              )}
             </button>
           )}
         </div>
       </form>
-
-      <div className="mt-6 text-center text-xs uppercase tracking-wider text-[var(--mft-muted)] border-t border-[var(--mft-border)] pt-4">
-        ALREADY REGISTERED?{" "}
-        <Link href="/" className="font-bold text-[var(--mft-primary)] hover:underline decoration-2 underline-offset-4">
-          ACCESS TERMINAL
-        </Link>
-      </div>
     </WorkerAuthShell>
   );
 }

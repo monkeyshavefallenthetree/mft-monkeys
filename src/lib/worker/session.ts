@@ -7,22 +7,69 @@ import {
   serverTimestamp,
   updateDoc,
   where,
+  arrayUnion,
 } from "firebase/firestore";
 import type { Firestore } from "firebase/firestore";
+import { localYmd } from "./format";
 
+/**
+ * A worker's attendance record for one calendar day.
+ *
+ * A day can contain several work *segments* (clock in → clock out → clock in
+ * again after a break). `priorMs` is the time already banked from earlier
+ * segments and `segmentStart` is when the current segment began, so
+ * `totalWorkTime = priorMs + (now - segmentStart)` never counts breaks.
+ */
 export type WorkSessionState = {
   id: string;
+  /** First clock-in of the day (used for lateness + "started at"). */
   startTime: Date;
+  /** Start of the currently running segment. */
+  segmentStart: Date;
+  /** Work time banked from earlier segments today (ms). */
+  priorMs: number;
   isActive: boolean;
 };
+
+/** Total worked time today, including the running segment. */
+export function workedMs(session: WorkSessionState | null, now = Date.now()): number {
+  if (!session) return 0;
+  const running = session.isActive ? Math.max(0, now - session.segmentStart.getTime()) : 0;
+  return session.priorMs + running;
+}
 
 export async function initWorkSession(
   db: Firestore,
   worker: { uid: string; firstName?: string; lastName?: string; email?: string },
-  loginTimeIso: string,
 ): Promise<WorkSessionState | null> {
-  const loginTime = new Date(loginTimeIso);
-  const today = new Date().toISOString().split("T")[0];
+  const now = new Date();
+  const today = localYmd(now);
+
+  const createNew = async (): Promise<WorkSessionState> => {
+    const ref = await addDoc(collection(db, "workSessions"), {
+      workerId: worker.uid,
+      workerName: `${worker.firstName ?? ""} ${worker.lastName ?? ""}`.trim(),
+      workerEmail: worker.email ?? "",
+      loginTime: now,
+      startTime: now,
+      isActive: true,
+      presenceStatus: "active",
+      lastActiveCheckAt: serverTimestamp(),
+      totalWorkTime: 0,
+      date: today,
+      createdAt: serverTimestamp(),
+    });
+
+    if (worker.uid) {
+      updateDoc(doc(db, "workers", worker.uid), {
+        presenceStatus: "active",
+        lastActiveAt: serverTimestamp(),
+        lastActiveCheckAt: serverTimestamp(),
+      }).catch(() => {});
+    }
+
+    return { id: ref.id, startTime: now, segmentStart: now, priorMs: 0, isActive: true };
+  };
 
   const q = query(
     collection(db, "workSessions"),
@@ -33,75 +80,128 @@ export async function initWorkSession(
   try {
     const snap = await getDocs(q);
     if (!snap.empty) {
+      // Resume today's record: bank what was already logged, start a new segment now.
       const existing = snap.docs[0]!;
       const data = existing.data();
-      const start = data.startTime?.toDate?.() ?? new Date(data.startTime);
+      const start: Date = data.startTime?.toDate?.() ?? new Date(data.startTime ?? now);
+      const priorMs = typeof data.totalWorkTime === "number" ? data.totalWorkTime : 0;
       await updateDoc(doc(db, "workSessions", existing.id), {
         isActive: true,
-        lastLoginTime: loginTime,
+        presenceStatus: "active",
+        lastLoginTime: now,
+        lastActiveCheckAt: serverTimestamp(),
         lastUpdated: serverTimestamp(),
       });
-      return { id: existing.id, startTime: start, isActive: true };
+
+      if (worker.uid) {
+        updateDoc(doc(db, "workers", worker.uid), {
+          presenceStatus: "active",
+          lastActiveAt: serverTimestamp(),
+          lastActiveCheckAt: serverTimestamp(),
+        }).catch(() => {});
+      }
+
+      return { id: existing.id, startTime: start, segmentStart: now, priorMs, isActive: true };
     }
-
-    const ref = await addDoc(collection(db, "workSessions"), {
-      workerId: worker.uid,
-      workerName: `${worker.firstName ?? ""} ${worker.lastName ?? ""}`.trim(),
-      workerEmail: worker.email ?? "",
-      loginTime,
-      startTime: loginTime,
-      isActive: true,
-      totalWorkTime: 0,
-      date: today,
-      createdAt: serverTimestamp(),
-    });
-
-    return { id: ref.id, startTime: loginTime, isActive: true };
+    return await createNew();
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "";
-    if (msg.includes("index")) {
-      const ref = await addDoc(collection(db, "workSessions"), {
-        workerId: worker.uid,
-        workerName: `${worker.firstName ?? ""} ${worker.lastName ?? ""}`.trim(),
-        workerEmail: worker.email ?? "",
-        loginTime,
-        startTime: loginTime,
-        isActive: true,
-        totalWorkTime: 0,
-        date: today,
-        createdAt: serverTimestamp(),
-      });
-      return { id: ref.id, startTime: loginTime, isActive: true };
-    }
+    if (msg.includes("index")) return await createNew();
     console.error("initWorkSession", e);
     return null;
   }
 }
 
-export async function syncWorkSession(
-  db: Firestore,
-  session: WorkSessionState,
-): Promise<void> {
+export async function syncWorkSession(db: Firestore, session: WorkSessionState): Promise<void> {
   if (!session.isActive) return;
-  const now = new Date();
-  const totalWorkTime = now.getTime() - session.startTime.getTime();
   await updateDoc(doc(db, "workSessions", session.id), {
-    totalWorkTime,
+    totalWorkTime: workedMs(session),
     lastUpdated: serverTimestamp(),
   });
 }
 
-export async function endWorkSession(
-  db: Firestore,
-  session: WorkSessionState,
-): Promise<void> {
+/** Closes the running segment. Returns the banked session (isActive=false). */
+export async function endWorkSession(db: Firestore, session: WorkSessionState): Promise<WorkSessionState> {
   const logoutTime = new Date();
-  const totalWorkTime = logoutTime.getTime() - session.startTime.getTime();
+  const totalWorkTime = workedMs(session, logoutTime.getTime());
   await updateDoc(doc(db, "workSessions", session.id), {
     logoutTime,
     endTime: logoutTime,
     isActive: false,
+    presenceStatus: "offline",
     totalWorkTime,
     completedAt: serverTimestamp(),
   });
+  return { ...session, priorMs: totalWorkTime, segmentStart: logoutTime, isActive: false };
 }
+
+/**
+ * Worker confirms active presence during 2h check-in prompt.
+ * Records check-in entry, current task, note, and sets presenceStatus to active.
+ */
+export async function confirmPresenceCheckIn(
+  db: Firestore,
+  sessionId: string,
+  workerId: string,
+  data: {
+    taskId?: string;
+    taskTitle?: string;
+    note?: string;
+    workerName?: string;
+  },
+): Promise<void> {
+  const now = new Date();
+  const checkInRecord = {
+    timestamp: now.toISOString(),
+    taskId: data.taskId || null,
+    taskTitle: data.taskTitle || "Active & Available",
+    note: data.note || null,
+    workerName: data.workerName || "",
+  };
+
+  const sessionRef = doc(db, "workSessions", sessionId);
+  await updateDoc(sessionRef, {
+    presenceStatus: "active",
+    lastActiveCheckAt: serverTimestamp(),
+    currentTaskTitle: data.taskTitle || "Active & Available",
+    currentTaskNote: data.note || null,
+    checkIns: arrayUnion(checkInRecord),
+    lastUpdated: serverTimestamp(),
+  });
+
+  if (workerId) {
+    const workerRef = doc(db, "workers", workerId);
+    await updateDoc(workerRef, {
+      presenceStatus: "active",
+      lastActiveAt: serverTimestamp(),
+      lastActiveCheckAt: serverTimestamp(),
+      currentTaskTitle: data.taskTitle || "Active & Available",
+      currentTaskNote: data.note || null,
+    }).catch(() => {});
+  }
+}
+
+/**
+ * Marks session as idle if worker failed to respond within countdown window.
+ */
+export async function markSessionIdle(
+  db: Firestore,
+  sessionId: string,
+  workerId: string,
+): Promise<void> {
+  const sessionRef = doc(db, "workSessions", sessionId);
+  await updateDoc(sessionRef, {
+    presenceStatus: "idle",
+    missedCheckInAt: serverTimestamp(),
+    lastUpdated: serverTimestamp(),
+  });
+
+  if (workerId) {
+    const workerRef = doc(db, "workers", workerId);
+    await updateDoc(workerRef, {
+      presenceStatus: "idle",
+      missedCheckInAt: serverTimestamp(),
+    }).catch(() => {});
+  }
+}
+

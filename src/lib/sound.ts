@@ -1,5 +1,23 @@
-export function playTerminalBeep() {
+const SOUND_KEY = "mft.sound";
+
+/** Notification chime preference (persisted). Defaults to on. */
+export function isSoundEnabled(): boolean {
+  if (typeof window === "undefined") return true;
+  return localStorage.getItem(SOUND_KEY) !== "off";
+}
+
+export function setSoundEnabled(on: boolean) {
   if (typeof window === "undefined") return;
+  localStorage.setItem(SOUND_KEY, on ? "on" : "off");
+}
+
+/**
+ * Short notification chime. Respects the user's mute preference unless
+ * `force` is set (used by the "Test sound" button).
+ */
+export function playTerminalBeep(opts?: { force?: boolean }) {
+  if (typeof window === "undefined") return;
+  if (!opts?.force && !isSoundEnabled()) return;
   try {
     const AudioContextClass =
       window.AudioContext ||
@@ -22,6 +40,7 @@ export function playTerminalBeep() {
 
     osc.start();
     osc.stop(ctx.currentTime + 0.15);
+    osc.onended = () => void ctx.close().catch(() => {});
   } catch (e) {
     console.error("Audio play failed", e);
   }

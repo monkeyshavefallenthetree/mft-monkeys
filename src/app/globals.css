@@ -1,92 +1,151 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
 @import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-heading: "Oswald", "Inter", sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+}
 
 @layer base {
   :root {
+    color-scheme: light;
+    --mft-bg: #f8fafc;
+    --mft-surface: #ffffff;
+    --mft-surface-hover: #f1f5f9;
+    --mft-border: #e2e8f0;
+    --mft-border-strong: #cbd5e1;
+    --mft-primary: #dc2626;
+    --mft-primary-hover: #b91c1c;
+    --mft-primary-soft: #fef2f2;
+    --mft-muted: #64748b;
+    --mft-text: #0f172a;
+    --mft-radius: 12px;
+    --mft-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+    --mft-shadow: 0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.04);
+    --mft-shadow-lg: 0 12px 32px -8px rgba(15, 23, 42, 0.16), 0 4px 8px -4px rgba(15, 23, 42, 0.06);
+  }
+
+  html.dark {
     color-scheme: dark;
-    --mft-primary: #FF5500;
-    --mft-bg: #000000;
-    --mft-surface: #0a0a0a;
-    --mft-border: #333333;
-    --mft-text: #ffffff;
-    --mft-muted: #888888;
+    --mft-bg: #09090b;
+    --mft-surface: #121215;
+    --mft-surface-hover: #18181b;
+    --mft-border: #27272a;
+    --mft-border-strong: #3f3f46;
+    --mft-primary: #dc2626;
+    --mft-primary-hover: #ef4444;
+    --mft-primary-soft: #450a0a;
+    --mft-muted: #a1a1aa;
+    --mft-text: #fafafa;
+    --mft-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --mft-shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.3);
+    --mft-shadow-lg: 0 12px 32px -8px rgba(0, 0, 0, 0.7);
   }
 
   html {
     background: var(--mft-bg);
     color: var(--mft-text);
+    font-family: var(--font-sans);
   }
 
   body {
     min-height: 100dvh;
     background: var(--mft-bg);
     color: var(--mft-text);
-    font-family: var(--font-plex-mono), monospace;
+    font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
   }
 
-  h1, h2, h3, h4, h5, h6 {
-    font-family: var(--font-oswald), sans-serif;
-    text-transform: uppercase;
-    letter-spacing: 0.02em;
+  button, input, select, textarea {
+    font-family: inherit;
   }
 
   * {
     box-sizing: border-box;
-    /* Brutalist: Disable default rounded corners universally if possible, but let's just make it stark */
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-      animation-duration: 0.01ms !important;
-      animation-iteration-count: 1 !important;
-      transition-duration: 0.01ms !important;
-    }
+  :focus-visible {
+    outline: 2px solid var(--mft-primary);
+    outline-offset: 2px;
   }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+  html.dark ::-webkit-scrollbar-thumb { background: #3f3f46; }
+  ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  html.dark ::-webkit-scrollbar-thumb:hover { background: #52525b; }
 }
 
 @layer utilities {
-  .focus-ring {
-    @apply outline-none ring-2 ring-[var(--mft-primary)] ring-offset-2 ring-offset-[#000000];
+  .font-heading { font-family: var(--font-heading); }
+  .font-mono { font-family: var(--font-mono); }
+
+  /* ── UI card & components ── */
+  .ui-card {
+    @apply rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900;
+    box-shadow: var(--mft-shadow);
+  }
+  .ui-card-hover {
+    @apply transition-all hover:-translate-y-0.5 hover:border-zinc-300 dark:hover:border-zinc-700;
+  }
+  .ui-card-hover:hover {
+    box-shadow: var(--mft-shadow-lg);
   }
 
+  /* Brutal compatibility classes (modernized) */
   .brutal-card {
-    @apply bg-[var(--mft-surface)] border border-[var(--mft-border)] rounded-none shadow-[4px_4px_0px_0px_#FF5500];
+    @apply rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900;
+    box-shadow: var(--mft-shadow);
   }
-  
   .brutal-card-hover {
-    @apply hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[2px_2px_0px_0px_#FF5500] transition-all duration-75;
-  }
-
-  .brutal-input {
-    @apply w-full bg-[#000000] border border-[var(--mft-border)] rounded-none px-4 py-3 text-white focus:border-[var(--mft-primary)] outline-none transition-colors duration-75;
+    @apply transition-all hover:-translate-y-0.5 hover:border-zinc-300 dark:hover:border-zinc-700;
   }
 
   .brutal-btn {
-    @apply px-6 py-3 bg-[var(--mft-primary)] text-black font-bold uppercase tracking-wider rounded-none border border-transparent hover:bg-white hover:text-black hover:border-white transition-colors duration-75 active:scale-[0.98];
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-600 bg-red-600 px-4 py-2 text-xs font-semibold text-white transition-all hover:bg-red-700 hover:border-red-700 active:scale-[0.98] cursor-pointer disabled:cursor-not-allowed disabled:opacity-60;
+    box-shadow: 0 1px 2px rgba(220, 38, 38, 0.25);
   }
 
   .brutal-btn-outline {
-    @apply px-6 py-3 bg-transparent text-white font-bold uppercase tracking-wider rounded-none border border-[var(--mft-border)] hover:bg-white hover:text-black hover:border-white transition-colors duration-75 active:scale-[0.98];
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-4 py-2 text-xs font-semibold text-zinc-800 transition-all hover:bg-zinc-50 hover:border-zinc-400 active:scale-[0.98] cursor-pointer dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 dark:hover:border-zinc-600 disabled:opacity-60;
+    box-shadow: var(--mft-shadow-sm);
+  }
+
+  .brutal-input {
+    @apply w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-red-500 focus:ring-4 focus:ring-red-500/10 focus:outline-none transition-all dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-red-500 dark:focus:ring-red-500/20;
+  }
+
+  .brutal-badge {
+    @apply inline-flex items-center rounded-md border border-zinc-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide dark:border-zinc-700;
+  }
+
+  .animate-fade-in { animation: mft-fade-in 0.25s ease-out both; }
+  .animate-slide-up { animation: mft-slide-up 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+  .animate-scale-in { animation: mft-scale-in 0.18s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+  .animate-toast-in { animation: mft-toast-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+
+  .mft-skeleton {
+    background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 37%, #f1f5f9 63%);
+    background-size: 400% 100%;
+    animation: mft-shimmer 1.4s ease infinite;
+  }
+  html.dark .mft-skeleton {
+    background: linear-gradient(90deg, #18181b 25%, #27272a 37%, #18181b 63%);
+    background-size: 400% 100%;
   }
 }
 
-/* Auth pages — Terminal/Industrial aesthetic */
-.worker-auth-root {
-  background: var(--mft-bg);
-  background-image: linear-gradient(rgba(255, 85, 0, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 85, 0, 0.05) 1px, transparent 1px);
-  background-size: 64px 64px;
-}
+@keyframes mft-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes mft-slide-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes mft-scale-in { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: none; } }
+@keyframes mft-toast-in { from { opacity: 0; transform: translateY(10px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes mft-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
 
-@keyframes brutal-shimmer {
-  0% { opacity: 1; }
-  50% { opacity: 0.5; }
-  100% { opacity: 1; }
-}
-
-.worker-btn-loading {
-  background-color: var(--mft-primary);
-  animation: brutal-shimmer 1s steps(2, end) infinite;
-}
+/* Dark mode class overrides for legacy utilities */
+html.dark .bg-black { background-color: #09090b !important; }
+html.dark .bg-\[\#000000\] { background-color: #09090b !important; }

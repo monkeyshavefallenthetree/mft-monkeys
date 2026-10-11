@@ -5,8 +5,6 @@ import path from "path";
 const __filename = fileURLToPath(import.meta.url);
 const root = path.dirname(__filename);
 
-const nextConfig: NextConfig = {
-  turbopack: { root },
-};
+const nextConfig: NextConfig = {};
 
 export default nextConfig;

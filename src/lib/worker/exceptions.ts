@@ -2,6 +2,7 @@ import {
   addDoc,
   collection,
   getDocs,
+  onSnapshot,
   orderBy,
   query,
   serverTimestamp,
@@ -24,14 +25,33 @@ export async function loadWorkerExceptions(db: Firestore, workerId: string): Pro
   } catch {
     const q2 = query(collection(db, "exceptionRequests"), where("workerId", "==", workerId));
     const snap = await getDocs(q2);
-    const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() })) as ExceptionRow[];
-    rows.sort((a, b) => {
-      const da = toDate(a.createdAt as never) ?? new Date(0);
-      const db_ = toDate(b.createdAt as never) ?? new Date(0);
-      return db_.getTime() - da.getTime();
-    });
-    return rows;
+    return sortByCreatedDesc(snap.docs.map((d) => ({ id: d.id, ...d.data() })) as ExceptionRow[]);
   }
+}
+
+function sortByCreatedDesc(rows: ExceptionRow[]): ExceptionRow[] {
+  return rows.sort((a, b) => {
+    const da = toDate(a.createdAt as never) ?? new Date();
+    const db_ = toDate(b.createdAt as never) ?? new Date();
+    return db_.getTime() - da.getTime();
+  });
+}
+
+/**
+ * Live feed of the worker's requests so admin decisions show up instantly.
+ * Uses the single-field query (no composite index needed) and sorts locally.
+ */
+export function subscribeWorkerExceptions(
+  db: Firestore,
+  workerId: string,
+  onData: (rows: ExceptionRow[]) => void,
+  onError?: (e: Error) => void,
+): () => void {
+  return onSnapshot(
+    query(collection(db, "exceptionRequests"), where("workerId", "==", workerId)),
+    (snap) => onData(sortByCreatedDesc(snap.docs.map((d) => ({ id: d.id, ...d.data() })) as ExceptionRow[])),
+    (e) => onError?.(e),
+  );
 }
 
 export async function submitException(
@@ -45,6 +65,7 @@ export async function submitException(
     exceptionDate: string;
     reason: string;
     supportingEvidence: string | null;
+    requestedAmount?: number | null;
   },
 ): Promise<string> {
   const ref = await addDoc(collection(db, "exceptionRequests"), {

@@ -16,6 +16,21 @@ export function formatRole(role: string | undefined): string {
     .join(" ");
 }
 
+/**
+ * Local calendar date as YYYY-MM-DD. Use this instead of
+ * `toISOString().split("T")[0]`, which returns the *UTC* date and files
+ * records under the wrong day for timezones ahead of UTC.
+ * Matches the admin dashboard, which keys sessions by local date.
+ */
+export function localYmd(d: Date = new Date()): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+export function greetingFor(d: Date = new Date()): string {
+  const h = d.getHours();
+  return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+}
+
 export function toDate(value: Timestamp | Date | string | null | undefined): Date | null {
   if (!value) return null;
   if (value instanceof Date) return value;
