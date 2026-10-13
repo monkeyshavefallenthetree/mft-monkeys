@@ -11,6 +11,8 @@ import {
   updateTask,
   deleteTask,
   assignedWorkerIds,
+  sanitizeSubtask,
+  sanitizeSubtasks,
   type ProjectRow,
   type TaskRow,
   type WorkerRow,
@@ -445,13 +447,13 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
 
   const handleAddModalSubtask = () => {
     if (!newSubtaskInput.trim()) return;
-    const item: Subtask = {
+    const item: Subtask = sanitizeSubtask({
       id: `st-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       title: newSubtaskInput.trim(),
       description: newSubtaskDesc.trim() || undefined,
       link: newSubtaskLink.trim() || undefined,
       completed: false,
-    };
+    });
     setFormSubtasks((prev) => [...prev, item]);
     setNewSubtaskInput("");
     setNewSubtaskDesc("");
@@ -581,7 +583,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
           assignedWorkerIds: formAssignedWorkerIds,
           dueDate: formDueDate ? new Date(formDueDate) : null,
           photo: formPhoto.trim() || null,
-          subtasks: formSubtasks,
+          subtasks: sanitizeSubtasks(formSubtasks),
           createdBy: uid,
           createdByName: workerName || "Team Member",
           notificationMessage: formNotificationMessage.trim() || undefined,
@@ -598,7 +600,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
           assignedWorkerName: assignedNames || "Unassigned",
           dueDate: formDueDate ? new Date(formDueDate) : null,
           photo: formPhoto.trim() || null,
-          subtasks: formSubtasks,
+          subtasks: sanitizeSubtasks(formSubtasks),
         };
         if (formProjectId) {
           updateData.projectId = formProjectId;

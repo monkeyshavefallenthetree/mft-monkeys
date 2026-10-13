@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import type { Firestore } from "firebase/firestore";
 import { doc, updateDoc } from "firebase/firestore";
 import type { TaskRow, Subtask, WorkerRow } from "@/lib/worker/tasks";
-import { assignedWorkerIds } from "@/lib/worker/tasks";
+import { assignedWorkerIds, sanitizeSubtask, sanitizeSubtasks } from "@/lib/worker/tasks";
 import TaskChat from "./TaskChat";
 import { toast } from "@/lib/worker/feedback";
 
@@ -160,10 +160,11 @@ export default function TaskDetailDrawer({
     if (subtasksBusy) return;
     setSubtasksBusy(true);
     try {
-      const updated = subtasksList.map((st) =>
+      const current = sanitizeSubtasks(task.subtasks);
+      const updated = current.map((st) =>
         st.id === subtaskId ? { ...st, completed: !st.completed } : st,
       );
-      await updateDoc(doc(db, "tasks", task.id), { subtasks: updated });
+      await updateDoc(doc(db, "tasks", task.id), { subtasks: sanitizeSubtasks(updated) });
       task.subtasks = updated;
       onTaskUpdated?.();
     } catch {
@@ -178,15 +179,15 @@ export default function TaskDetailDrawer({
     if (!newSubtaskTitle.trim() || subtasksBusy) return;
     setSubtasksBusy(true);
     try {
-      const newSubtask: Subtask = {
-        id: `st-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-        title: newSubtaskTitle.trim(),
-        description: newSubtaskDesc.trim() || undefined,
-        link: newSubtaskLink.trim() || undefined,
+      const current = sanitizeSubtasks(task.subtasks);
+      const newSubtask = sanitizeSubtask({
+        title: newSubtaskTitle,
+        description: newSubtaskDesc,
+        link: newSubtaskLink,
         completed: false,
-      };
-      const updated = [...subtasksList, newSubtask];
-      await updateDoc(doc(db, "tasks", task.id), { subtasks: updated });
+      });
+      const updated = [...current, newSubtask];
+      await updateDoc(doc(db, "tasks", task.id), { subtasks: sanitizeSubtasks(updated) });
       task.subtasks = updated;
       setNewSubtaskTitle("");
       setNewSubtaskDesc("");
@@ -211,17 +212,18 @@ export default function TaskDetailDrawer({
     if (!editingSubtaskId || !editTitle.trim() || subtasksBusy) return;
     setSubtasksBusy(true);
     try {
-      const updated = subtasksList.map((st) =>
+      const current = sanitizeSubtasks(task.subtasks);
+      const updated = current.map((st) =>
         st.id === editingSubtaskId
-          ? {
+          ? sanitizeSubtask({
               ...st,
-              title: editTitle.trim(),
-              description: editDesc.trim() || undefined,
-              link: editLink.trim() || undefined,
-            }
+              title: editTitle,
+              description: editDesc,
+              link: editLink,
+            })
           : st
       );
-      await updateDoc(doc(db, "tasks", task.id), { subtasks: updated });
+      await updateDoc(doc(db, "tasks", task.id), { subtasks: sanitizeSubtasks(updated) });
       task.subtasks = updated;
       setEditingSubtaskId(null);
       setEditTitle("");
@@ -247,7 +249,7 @@ export default function TaskDetailDrawer({
     if (subtasksBusy) return;
     setSubtasksBusy(true);
     try {
-      const updated = subtasksList.filter((st) => st.id !== subtaskId);
+      const updated = sanitizeSubtasks(subtasksList.filter((st) => st.id !== subtaskId));
       await updateDoc(doc(db, "tasks", task.id), { subtasks: updated });
       task.subtasks = updated;
       onTaskUpdated?.();
