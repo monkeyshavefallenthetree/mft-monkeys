@@ -6,6 +6,7 @@ import { doc, updateDoc } from "firebase/firestore";
 import type { TaskRow, Subtask, WorkerRow } from "@/lib/worker/tasks";
 import { assignedWorkerIds, sanitizeSubtask, sanitizeSubtasks } from "@/lib/worker/tasks";
 import TaskChat from "./TaskChat";
+import LinkifiedText from "./LinkifiedText";
 import { toast } from "@/lib/worker/feedback";
 
 interface Props {
@@ -697,7 +698,7 @@ export default function TaskDetailDrawer({
                                     st.completed ? "text-zinc-400 dark:text-zinc-500 line-through" : "text-zinc-500 dark:text-zinc-400"
                                   }`}
                                 >
-                                  {st.description}
+                                  <LinkifiedText text={st.description} />
                                 </p>
                               )}
                               {st.link && (
@@ -791,7 +792,7 @@ export default function TaskDetailDrawer({
               <div className="space-y-2">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-500">Task Directives</h3>
                 <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-4 text-sm leading-relaxed text-zinc-800 whitespace-pre-wrap dark:border-zinc-800 dark:bg-zinc-800/50 dark:text-zinc-200">
-                  {task.description ? task.description : <span className="italic text-zinc-400">No description provided.</span>}
+                  <LinkifiedText text={task.description} placeholder="No description provided." />
                 </div>
               </div>
 

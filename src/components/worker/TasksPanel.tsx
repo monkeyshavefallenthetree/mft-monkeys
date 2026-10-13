@@ -21,6 +21,7 @@ import {
 import TasksCalendar from "./TasksCalendar";
 import TaskBoardView from "./TaskBoardView";
 import TaskDetailDrawer from "./TaskDetailDrawer";
+import LinkifiedText from "./LinkifiedText";
 import { toast, confirmDialog } from "@/lib/worker/feedback";
 import { localYmd } from "@/lib/worker/format";
 
@@ -1095,8 +1096,8 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
                           </div>
 
                           {task.description && (
-                            <p className="mt-1 line-clamp-1 text-xs text-zinc-500 leading-normal">
-                              {task.description}
+                            <p className="mt-1 line-clamp-2 text-xs text-zinc-500 leading-normal">
+                              <LinkifiedText text={task.description} />
                             </p>
                           )}
 
@@ -1548,7 +1549,9 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
                         <div className="flex-1 min-w-0">
                           <span className="font-semibold block truncate text-zinc-800 dark:text-zinc-200">{st.title}</span>
                           {st.description && (
-                            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 whitespace-pre-wrap">{st.description}</p>
+                            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 whitespace-pre-wrap">
+                              <LinkifiedText text={st.description} />
+                            </p>
                           )}
                           {st.link && (
                             <a
