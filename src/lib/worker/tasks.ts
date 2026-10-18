@@ -60,6 +60,7 @@ export type TaskRow = {
   priority?: string;
   assignedTo?: string | string[];
   assignedWorkerName?: string;
+  startDate?: Timestamp | Date | null;
   dueDate?: Timestamp | Date | null;
   photo?: string | null;
   status?: string;
@@ -142,6 +143,7 @@ export async function createTask(
     assignedTo?: string | string[];
     assignedWorkerName?: string;
     assignedWorkerIds?: string[];
+    startDate?: Date | null;
     dueDate?: Date | null;
     photo?: string | null;
     subtasks?: Subtask[];
@@ -160,6 +162,7 @@ export async function createTask(
     assignedWorkerName: data.assignedWorkerName || "Unassigned",
     priority: data.priority || "medium",
     status: "assigned",
+    startDate: data.startDate ?? null,
     dueDate: data.dueDate ?? null,
     subtasks: data.subtasks || [],
     createdBy: data.createdBy,
@@ -174,22 +177,35 @@ export async function createTask(
 
   const docRef = await addDoc(collection(db, "tasks"), payload);
 
-  // Send assignment alerts to assigned workers
-  const targetWorkerIds = data.assignedWorkerIds || assignedWorkerIds(data.assignedTo);
+  // Send assignment alerts & Web Push to assigned workers
+  const targetWorkerIds = (data.assignedWorkerIds || assignedWorkerIds(data.assignedTo)).filter(
+    (wid) => wid && wid !== data.createdBy,
+  );
   for (const workerId of targetWorkerIds) {
-    if (workerId && workerId !== data.createdBy) {
-      await addDoc(collection(db, "alerts"), {
-        recipients: [workerId],
-        title: "New Task Assigned",
-        message: data.notificationMessage?.trim() || `${data.createdByName} assigned you to task: ${data.title}`,
-        type: "schedule",
-        priority: data.priority || "medium",
-        isRead: false,
-        createdAt: serverTimestamp(),
-        sentAt: serverTimestamp(),
-        sentBy: data.createdByName || "Team Member",
-      }).catch(() => {});
-    }
+    await addDoc(collection(db, "alerts"), {
+      recipients: [workerId],
+      title: "New Task Assigned",
+      message: data.notificationMessage?.trim() || `${data.createdByName} assigned you to task: ${data.title}`,
+      type: "schedule",
+      priority: data.priority || "medium",
+      isRead: false,
+      createdAt: serverTimestamp(),
+      sentAt: serverTimestamp(),
+      sentBy: data.createdByName || "Team Member",
+    }).catch(() => {});
+  }
+  if (targetWorkerIds.length > 0) {
+    import("./webPush")
+      .then(({ sendWebPushToWorkers }) =>
+        sendWebPushToWorkers(db, {
+          recipientUids: targetWorkerIds,
+          title: "New Task Assigned 📋",
+          body: data.notificationMessage?.trim() || `${data.createdByName} assigned you: ${data.title}`,
+          tab: "tasks",
+          taskId: docRef.id,
+        }),
+      )
+      .catch(() => {});
   }
 
   return docRef.id;
@@ -214,22 +230,37 @@ export async function updateTask(
   });
 
   if (notification?.assignedWorkerIds && notification.assignedWorkerIds.length > 0) {
-    for (const workerId of notification.assignedWorkerIds) {
-      if (workerId && workerId !== notification.currentUid) {
-        await addDoc(collection(db, "alerts"), {
-          recipients: [workerId],
-          title: "Task Reassigned / Updated",
-          message:
-            notification.message?.trim() ||
-            `${notification.senderName || "Team"} updated task: ${notification.taskTitle || "Task"}`,
-          type: "schedule",
-          priority: notification.priority || "medium",
-          isRead: false,
-          createdAt: serverTimestamp(),
-          sentAt: serverTimestamp(),
-          sentBy: notification.senderName || "Team Member",
-        }).catch(() => {});
-      }
+    const targets = notification.assignedWorkerIds.filter(
+      (wid) => wid && wid !== notification.currentUid,
+    );
+    const bodyMsg =
+      notification.message?.trim() ||
+      `${notification.senderName || "Team"} updated task: ${notification.taskTitle || "Task"}`;
+    for (const workerId of targets) {
+      await addDoc(collection(db, "alerts"), {
+        recipients: [workerId],
+        title: "Task Reassigned / Updated",
+        message: bodyMsg,
+        type: "schedule",
+        priority: notification.priority || "medium",
+        isRead: false,
+        createdAt: serverTimestamp(),
+        sentAt: serverTimestamp(),
+        sentBy: notification.senderName || "Team Member",
+      }).catch(() => {});
+    }
+    if (targets.length > 0) {
+      import("./webPush")
+        .then(({ sendWebPushToWorkers }) =>
+          sendWebPushToWorkers(db, {
+            recipientUids: targets,
+            title: "Task Updated 📋",
+            body: bodyMsg,
+            tab: "tasks",
+            taskId,
+          }),
+        )
+        .catch(() => {});
     }
   }
 }

@@ -46,6 +46,20 @@ function formatDue(val: unknown) {
   };
 }
 
+function formatStart(val: unknown): string | null {
+  if (!val) return null;
+  let d: Date;
+  if (val && typeof (val as { toDate?: () => Date }).toDate === "function") {
+    d = (val as { toDate: () => Date }).toDate();
+  } else if (val instanceof Date) {
+    d = val;
+  } else {
+    d = new Date(String(val));
+  }
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 export default function TaskBoardView({
   tasks,
   onSelectTask,
@@ -84,6 +98,7 @@ export default function TaskBoardView({
               ) : (
                 colTasks.map((t) => {
                   const pr = PRIORITY_BADGES[t.priority?.toLowerCase() ?? "medium"] ?? PRIORITY_BADGES.medium;
+                  const start = formatStart(t.startDate);
                   const due = formatDue(t.dueDate);
                   const isRejected = t.status === "in-progress" && Boolean(t.rejectionReason);
 
@@ -139,20 +154,28 @@ export default function TaskBoardView({
 
                       {/* Footer meta */}
                       <div className="mt-2.5 flex items-center justify-between border-t border-zinc-100 pt-2 text-xs text-zinc-500 dark:border-zinc-800">
-                        {due ? (
-                          <span
-                            className={`flex items-center gap-1 text-[10px] font-medium ${
-                              due.isOverdue
-                                ? "text-red-600 font-semibold"
-                                : "text-zinc-500 dark:text-zinc-400"
-                            }`}
-                          >
-                            <span>📅</span>
-                            <span>{due.label}</span>
-                          </span>
-                        ) : (
-                          <span className="text-[10px] text-zinc-400">No due date</span>
-                        )}
+                        <div className="flex flex-wrap items-center gap-2">
+                          {start && (
+                            <span className="flex items-center gap-0.5 text-[10px] font-medium text-sky-600 dark:text-sky-400">
+                              <span>▶</span>
+                              <span>{start}</span>
+                            </span>
+                          )}
+                          {due ? (
+                            <span
+                              className={`flex items-center gap-1 text-[10px] font-medium ${
+                                due.isOverdue
+                                  ? "text-red-600 font-semibold"
+                                  : "text-zinc-500 dark:text-zinc-400"
+                              }`}
+                            >
+                              <span>📅</span>
+                              <span>{due.label}</span>
+                            </span>
+                          ) : !start ? (
+                            <span className="text-[10px] text-zinc-400">No due date</span>
+                          ) : null}
+                        </div>
 
                         {/* Quick action button inside card */}
                         <div onClick={(e) => e.stopPropagation()}>

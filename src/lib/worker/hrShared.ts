@@ -6,8 +6,9 @@ import {
   where,
   type Firestore,
 } from "firebase/firestore";
+import { POLICY_2026_SETTINGS_DEFAULTS, type Policy2026SettingsFields } from "./hrPolicy2026";
 
-export interface HrSettings {
+export interface HrSettings extends Policy2026SettingsFields {
   monthStartDay: number; // 1 - 28 (e.g. 21 for 21st to 20th cycle)
   weekendDays: number[]; // e.g. [5, 6] for Friday & Saturday
   standardHours: number; // e.g. 8
@@ -19,16 +20,19 @@ export interface HrSettings {
   absencePenaltyMultiplier: number; // 2.0
 }
 
+// Kept in sync with mft-admin DEFAULT_HR_SETTINGS (used only until `settings/hr` loads).
 export const DEFAULT_HR_SETTINGS: HrSettings = {
-  monthStartDay: 1,
+  monthStartDay: 21,
   weekendDays: [5, 6], // Friday & Saturday (standard Egypt / MENA)
   standardHours: 8,
   shiftStartTime: "10:00",
-  gracePeriodMinutes: 30,
-  secondThresholdMinutes: 60,
-  defaultHourlyRate: 100,
+  gracePeriodMinutes: 60, // 11:00 AM
+  secondThresholdMinutes: 120, // 12:00 PM
+  defaultHourlyRate: 31.25,
   overtimeMultiplier: 1.5,
   absencePenaltyMultiplier: 2.0,
+  // HR-POL-2026 (off until enabled by an admin)
+  ...POLICY_2026_SETTINGS_DEFAULTS,
 };
 
 export interface HolidayItem {
@@ -176,7 +180,7 @@ export function getPayrollCycleRange(
     end,
     startYmd: formatYmd(start),
     endYmd: formatYmd(end),
-    label: `${startFormatted} â€“ ${endFormatted}`,
+    label: `${startFormatted} – ${endFormatted}`,
   };
 }
 

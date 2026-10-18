@@ -202,6 +202,20 @@ export async function markSessionIdle(
       presenceStatus: "idle",
       missedCheckInAt: serverTimestamp(),
     }).catch(() => {});
+
+    import("./adminNotifications")
+      .then(({ notifyAdmins }) =>
+        notifyAdmins(db, {
+          targetRoles: ["super_admin", "hr_admin"],
+          category: "hr",
+          eventType: "missed_checkin",
+          title: "⚠️ Missed 2-Hour Presence Check-In",
+          body: `Worker (${workerId}) did not respond to the active presence check-in window and was marked Idle.`,
+          href: "/admin/work-sessions",
+          actorUid: workerId,
+        }),
+      )
+      .catch(() => {});
   }
 }
 

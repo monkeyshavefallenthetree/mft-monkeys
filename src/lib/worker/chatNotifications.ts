@@ -71,21 +71,34 @@ export async function sendChatNotification(
       ? params.messageText.slice(0, 80) + "…"
       : params.messageText;
 
-  const promises = params.recipientUids
-    .filter((uid) => uid !== params.senderUid)
-    .map((uid) =>
-      addDoc(collection(db, "chatNotifications"), {
-        recipientUid: uid,
-        taskId: params.taskId,
-        taskTitle: params.taskTitle,
-        senderName: params.senderName,
-        senderRole: params.senderRole,
-        messagePreview: preview,
-        isRead: false,
-        createdAt: serverTimestamp(),
-      }),
-    );
+  const targets = params.recipientUids.filter((uid) => uid !== params.senderUid);
+  const promises = targets.map((uid) =>
+    addDoc(collection(db, "chatNotifications"), {
+      recipientUid: uid,
+      taskId: params.taskId,
+      taskTitle: params.taskTitle,
+      senderName: params.senderName,
+      senderRole: params.senderRole,
+      messagePreview: preview,
+      isRead: false,
+      createdAt: serverTimestamp(),
+    }),
+  );
   await Promise.all(promises);
+
+  if (targets.length > 0) {
+    import("./webPush")
+      .then(({ sendWebPushToWorkers }) =>
+        sendWebPushToWorkers(db, {
+          recipientUids: targets,
+          title: `New message from ${params.senderName}`,
+          body: `${params.taskTitle}: ${preview}`,
+          tab: "tasks",
+          taskId: params.taskId,
+        }),
+      )
+      .catch(() => {});
+  }
 }
 
 export async function markChatNotificationRead(
@@ -123,6 +136,22 @@ export async function sendChatNotificationToAdmin(
     isRead: false,
     createdAt: serverTimestamp(),
   });
+
+  import("./adminNotifications")
+    .then(({ notifyAdmins }) =>
+      notifyAdmins(db, {
+        targetRoles: ["super_admin", "ops_admin"],
+        category: "chat",
+        eventType: "task_chat_message",
+        title: `💬 Message from ${params.senderName}`,
+        body: `${params.taskTitle}: ${preview}`,
+        href: `/admin/tasks?task=${encodeURIComponent(params.taskId)}`,
+        actorUid: params.senderUid,
+        actorName: params.senderName,
+        taskId: params.taskId,
+      }),
+    )
+    .catch(() => {});
 }
 
 export async function markTaskChatNotificationsRead(

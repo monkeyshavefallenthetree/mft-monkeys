@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Oswald, IBM_Plex_Mono, Inter } from "next/font/google";
 import "./globals.css";
 import { FeedbackHost } from "@/lib/worker/feedback";
@@ -22,9 +22,23 @@ const plexMono = IBM_Plex_Mono({
   display: "swap",
 });
 
+export const viewport: Viewport = {
+  themeColor: "#dc2626",
+};
+
 export const metadata: Metadata = {
   title: "MFT Monkeys · Worker Portal",
   description: "Worker portal, task management, and time tracking for Monkeys from Trees",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "MFT Worker",
+  },
+  icons: {
+    icon: "/icons/icon-192.png",
+    apple: "/icons/apple-touch-icon.png",
+  },
 };
 
 const themeScript = `(function(){try{var t=localStorage.getItem("mft.theme");var isDark=t==="dark"||(!t&&window.matchMedia("(prefers-color-scheme: dark)").matches);if(isDark){document.documentElement.classList.add("dark");}else{document.documentElement.classList.remove("dark");}}catch(e){}})();`;

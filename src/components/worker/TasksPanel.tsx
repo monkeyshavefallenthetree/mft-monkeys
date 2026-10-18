@@ -21,9 +21,12 @@ import {
 import TasksCalendar from "./TasksCalendar";
 import TaskBoardView from "./TaskBoardView";
 import TaskDetailDrawer from "./TaskDetailDrawer";
+import ProjectGroupChatModal from "./ProjectGroupChatModal";
 import LinkifiedText from "./LinkifiedText";
+import RichDescriptionEditor from "./RichDescriptionEditor";
 import { toast, confirmDialog } from "@/lib/worker/feedback";
 import { localYmd } from "@/lib/worker/format";
+import { notifyAdmins } from "@/lib/worker/adminNotifications";
 
 type Props = {
   db: Firestore;
@@ -110,6 +113,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
 
   // Drawer & Modals
   const [activeTask, setActiveTask] = useState<TaskRow | null>(null);
+  const [activeProjectChat, setActiveProjectChat] = useState<ProjectRow | null>(null);
   const [modalMode, setModalMode] = useState<"create" | "edit" | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
 
@@ -120,6 +124,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
   const [formPriority, setFormPriority] = useState("medium");
   const [formStatus, setFormStatus] = useState("assigned");
   const [formProjectId, setFormProjectId] = useState("");
+  const [formStartDate, setFormStartDate] = useState("");
   const [formDueDate, setFormDueDate] = useState("");
   const [formPhoto, setFormPhoto] = useState("");
   const [formAssignedWorkerIds, setFormAssignedWorkerIds] = useState<string[]>([]);
@@ -148,6 +153,15 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
         if (!current) return null;
         return t.find((x) => x.id === current.id) ?? current;
       });
+
+      if (typeof window !== "undefined") {
+        const params = new URLSearchParams(window.location.search);
+        const projectChatId = params.get("projectChat");
+        if (projectChatId) {
+          const foundProj = p.find((x) => x.id === projectChatId);
+          if (foundProj) setActiveProjectChat(foundProj);
+        }
+      }
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "Failed to load tasks");
     } finally {
@@ -294,15 +308,21 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
       if (quickFilter === "today" && !isTaskDueToday(t)) return false;
       if (quickFilter === "urgent" && !isTaskUrgent(t)) return false;
 
-      // Calendar filter
+      // Calendar filter (matches either startDate or dueDate)
       if (viewMode === "calendar" && selectedDate) {
+        const s = parseTaskDueDate(t.startDate);
         const d = parseTaskDueDate(t.dueDate);
-        if (!d) return false;
-        const match =
+        const matchStart =
+          s &&
+          s.getFullYear() === selectedDate.getFullYear() &&
+          s.getMonth() === selectedDate.getMonth() &&
+          s.getDate() === selectedDate.getDate();
+        const matchDue =
+          d &&
           d.getFullYear() === selectedDate.getFullYear() &&
           d.getMonth() === selectedDate.getMonth() &&
           d.getDate() === selectedDate.getDate();
-        if (!match) return false;
+        if (!matchStart && !matchDue) return false;
       }
 
       // Search query
@@ -396,6 +416,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
     setFormPriority("medium");
     setFormStatus("assigned");
     setFormProjectId("");
+    setFormStartDate("");
     setFormDueDate("");
     setFormPhoto("");
     setFormAssignedWorkerIds([uid]); // Default self
@@ -410,6 +431,14 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
   };
 
   const openEditModal = (task: TaskRow) => {
+    let startDateStr = "";
+    if (task.startDate) {
+      const val = task.startDate as any;
+      const d = typeof val.toDate === "function" ? val.toDate() : new Date(val);
+      if (!isNaN(d.getTime())) {
+        startDateStr = localYmd(d);
+      }
+    }
     let dateStr = "";
     if (task.dueDate) {
       const val = task.dueDate as any;
@@ -425,6 +454,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
     setFormPriority(task.priority || "medium");
     setFormStatus(task.status || "assigned");
     setFormProjectId(task.projectId || "");
+    setFormStartDate(startDateStr);
     setFormDueDate(dateStr);
     const initialWorkerIds = Array.from(
       new Set(
@@ -463,9 +493,22 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
 
   async function startTask(id: string) {
     try {
+      const targetTask = tasks.find((t) => t.id === id) || activeTask;
       await updateTask(db, id, {
         status: "in-progress",
         startedAt: serverTimestamp(),
+      });
+      void notifyAdmins(db, {
+        targetRoles: ["super_admin", "ops_admin"],
+        category: "task",
+        eventType: "task_started",
+        title: `▶️ Task Started: ${targetTask?.title || "Directive"}`,
+        body: `${workerName || "Team Member"} started working on "${targetTask?.title || id}"${targetTask?.projectName ? ` (${targetTask.projectName})` : ""}.`,
+        href: `/admin/tasks?task=${encodeURIComponent(id)}`,
+        actorUid: uid,
+        actorName: workerName || "Team Member",
+        taskId: id,
+        projectId: targetTask?.projectId,
       });
       toast.success("Task started", { description: "Timer and activity are logged." });
       await refresh();
@@ -476,6 +519,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
 
   async function submitApproval(id: string) {
     try {
+      const targetTask = tasks.find((t) => t.id === id) || activeTask;
       await updateTask(db, id, {
         status: "pending-approval",
         submittedForApprovalAt: serverTimestamp(),
@@ -483,8 +527,20 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
       if (activeTask?.id === id) {
         setActiveTask((prev) => (prev ? { ...prev, status: "pending-approval" } : null));
       }
+      void notifyAdmins(db, {
+        targetRoles: ["super_admin", "ops_admin"],
+        category: "task",
+        eventType: "task_submitted_approval",
+        title: `✅ Task Submitted for Review: ${targetTask?.title || "Directive"}`,
+        body: `${workerName || "Team Member"} submitted "${targetTask?.title || id}" for approval.`,
+        href: `/admin/tasks?task=${encodeURIComponent(id)}`,
+        actorUid: uid,
+        actorName: workerName || "Team Member",
+        taskId: id,
+        projectId: targetTask?.projectId,
+      });
       toast.success("Submitted for approval", {
-        description: "Admin has been notified. You can undo if you need to edit further.",
+        description: "Admin & Account Manager have been notified. You can undo if you need to edit further.",
         action: {
           label: "Undo",
           onClick: () => void undoSubmission(id),
@@ -498,6 +554,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
 
   async function undoSubmission(id: string) {
     try {
+      const targetTask = tasks.find((t) => t.id === id) || activeTask;
       await updateTask(db, id, {
         status: "in-progress",
         submittedForApprovalAt: null,
@@ -505,6 +562,18 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
       if (activeTask?.id === id) {
         setActiveTask((prev) => (prev ? { ...prev, status: "in-progress", submittedForApprovalAt: undefined } : null));
       }
+      void notifyAdmins(db, {
+        targetRoles: ["super_admin", "ops_admin"],
+        category: "task",
+        eventType: "task_submission_undone",
+        title: `↩️ Submission Reverted: ${targetTask?.title || "Directive"}`,
+        body: `${workerName || "Team Member"} reverted "${targetTask?.title || id}" back to In Progress for further edits.`,
+        href: `/admin/tasks?task=${encodeURIComponent(id)}`,
+        actorUid: uid,
+        actorName: workerName || "Team Member",
+        taskId: id,
+        projectId: targetTask?.projectId,
+      });
       toast.success("Submission undone", {
         description: "Task reverted to In Progress. You can continue working and editing.",
       });
@@ -516,12 +585,25 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
 
   async function claimTask(id: string) {
     try {
+      const targetTask = tasks.find((t) => t.id === id) || activeTask;
       await updateTask(db, id, {
         assignedTo: uid,
         assignedWorkerName: workerName || "Team Member",
         assignedWorkerIds: [uid],
         status: "in-progress",
         startedAt: serverTimestamp(),
+      });
+      void notifyAdmins(db, {
+        targetRoles: ["super_admin", "ops_admin"],
+        category: "task",
+        eventType: "task_claimed",
+        title: `🙋 Task Claimed & Started: ${targetTask?.title || "Directive"}`,
+        body: `${workerName || "Team Member"} claimed and started "${targetTask?.title || id}".`,
+        href: `/admin/tasks?task=${encodeURIComponent(id)}`,
+        actorUid: uid,
+        actorName: workerName || "Team Member",
+        taskId: id,
+        projectId: targetTask?.projectId,
       });
       toast.success("Directive claimed!", { description: "You are now assigned. Moved to In Progress." });
       await refresh();
@@ -582,12 +664,24 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
           assignedTo: assignedToVal,
           assignedWorkerName: assignedNames || "Unassigned",
           assignedWorkerIds: formAssignedWorkerIds,
+          startDate: formStartDate ? new Date(formStartDate) : null,
           dueDate: formDueDate ? new Date(formDueDate) : null,
           photo: formPhoto.trim() || null,
           subtasks: sanitizeSubtasks(formSubtasks),
           createdBy: uid,
           createdByName: workerName || "Team Member",
           notificationMessage: formNotificationMessage.trim() || undefined,
+        });
+        void notifyAdmins(db, {
+          targetRoles: ["super_admin", "ops_admin"],
+          category: "task",
+          eventType: "task_created_by_worker",
+          title: `📝 New Task Created: ${formTitle.trim()}`,
+          body: `${workerName || "Team Member"} created task "${formTitle.trim()}" (assigned to ${assignedNames || "team"})${projName ? ` in ${projName}` : ""}.`,
+          href: "/admin/tasks",
+          actorUid: uid,
+          actorName: workerName || "Team Member",
+          projectId: formProjectId || undefined,
         });
         toast.success("Task created & assigned", { description: `Assigned to ${assignedNames}` });
       } else if (modalMode === "edit" && editId) {
@@ -599,6 +693,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
           status: formStatus,
           assignedTo: assignedToVal,
           assignedWorkerName: assignedNames || "Unassigned",
+          startDate: formStartDate ? new Date(formStartDate) : null,
           dueDate: formDueDate ? new Date(formDueDate) : null,
           photo: formPhoto.trim() || null,
           subtasks: sanitizeSubtasks(formSubtasks),
@@ -618,6 +713,18 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
           priority: formPriority,
           currentUid: uid,
           message: formNotificationMessage.trim() || undefined,
+        });
+        void notifyAdmins(db, {
+          targetRoles: ["super_admin", "ops_admin"],
+          category: "task",
+          eventType: "task_updated_by_worker",
+          title: `✏️ Task Updated: ${formTitle.trim()}`,
+          body: `${workerName || "Team Member"} updated task "${formTitle.trim()}" (assigned to ${assignedNames || "team"}).`,
+          href: `/admin/tasks?task=${encodeURIComponent(editId)}`,
+          actorUid: uid,
+          actorName: workerName || "Team Member",
+          taskId: editId,
+          projectId: formProjectId || undefined,
         });
         toast.success("Task updated & reassigned", { description: `Assigned to ${assignedNames}` });
       }
@@ -684,6 +791,39 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
           <p className="mt-1 text-2xl font-bold tracking-tight text-zinc-900 dark:text-white">{stats.rate}%</p>
         </div>
       </div>
+
+      {/* Project Group Chats Strip */}
+      {projects.length > 0 && (
+        <div className="ui-card p-3.5 flex flex-wrap items-center justify-between gap-2.5 border-l-4 border-l-red-600">
+          <div className="flex items-center gap-2">
+            <span className="text-sm">💬</span>
+            <div>
+              <p className="text-xs font-bold text-zinc-900 dark:text-white">
+                Project Group Chats
+              </p>
+              <p className="text-[11px] text-zinc-500">
+                Discuss project tasks directly with teammates, Account Manager & Admin
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {projects.slice(0, 8).map((p) => {
+              const pName = p.name || (p.title as string) || p.id;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => setActiveProjectChat(p)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs font-semibold text-zinc-800 hover:border-red-300 hover:bg-red-50 hover:text-red-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:border-red-800 dark:hover:bg-red-950/40 transition-all cursor-pointer"
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                  <span>{pName}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Scope Filter Switcher */}
       <div className="flex flex-wrap items-center gap-1.5 border-b border-zinc-200 dark:border-zinc-800 pb-2">
@@ -1008,7 +1148,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
             [...groupedByProject.entries()].map(([pid, list]) => (
               <div key={pid} className="ui-card overflow-hidden">
                 {/* Project Header */}
-                <div className="border-b border-zinc-200 bg-zinc-50/70 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-800/50 flex items-center justify-between">
+                <div className="border-b border-zinc-200 bg-zinc-50/70 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-800/50 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-bold text-zinc-900 dark:text-white">
                       {projectTitle(pid)}
@@ -1017,6 +1157,22 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
                       {list.length}
                     </span>
                   </div>
+                  {pid !== "__general__" && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const proj = projects.find((p) => p.id === pid) || {
+                          id: pid,
+                          name: projectTitle(pid),
+                        };
+                        setActiveProjectChat(proj);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-bold text-red-700 hover:bg-red-100 dark:border-red-900/60 dark:bg-red-950/50 dark:text-red-300 transition-colors cursor-pointer"
+                    >
+                      <span>💬</span>
+                      <span>Group Chat</span>
+                    </button>
+                  )}
                 </div>
 
                 {/* Tasks List */}
@@ -1072,6 +1228,17 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
                                 </span>
                               </div>
                             )}
+
+                            {task.startDate && (() => {
+                              const sd = parseTaskDueDate(task.startDate);
+                              if (!sd) return null;
+                              return (
+                                <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium font-mono bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                                  <span>▶ Start:</span>
+                                  <span>{sd.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
+                                </span>
+                              );
+                            })()}
 
                             {task.dueDate && (() => {
                               const d = parseTaskDueDate(task.dueDate);
@@ -1296,6 +1463,18 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
         onTaskUpdated={() => void refresh()}
       />
 
+      {/* Project Group Chat Modal */}
+      <ProjectGroupChatModal
+        db={db}
+        project={activeProjectChat}
+        tasks={tasks}
+        workers={workers}
+        uid={uid}
+        workerName={workerName}
+        onClose={() => setActiveProjectChat(null)}
+        onNewAdminMessage={onNewAdminMessage}
+      />
+
       {/* Create / Edit / Reassign Task Modal (Matching Admin Features) */}
       {modalMode !== null && (
         <div
@@ -1340,14 +1519,12 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
 
               <div>
                 <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1">
-                  Description / Directives
+                  Description / Directives (Headlines, Paragraphs &amp; Colors)
                 </label>
-                <textarea
-                  rows={3}
+                <RichDescriptionEditor
                   value={formDesc}
-                  onChange={(e) => setFormDesc(e.target.value)}
+                  onChange={setFormDesc}
                   placeholder="Details, requirements, guidelines, deliverables…"
-                  className="brutal-input resize-none"
                 />
               </div>
 
@@ -1388,8 +1565,8 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
                 </div>
               </div>
 
-              {/* Priority & Due Date */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Priority, Start Date & Due Date */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1">
                     Priority
@@ -1407,6 +1584,46 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1">
+                    Start Date
+                  </label>
+                  <input
+                    type="date"
+                    value={formStartDate}
+                    onChange={(e) => setFormStartDate(e.target.value)}
+                    className="brutal-input"
+                  />
+                  <div className="flex flex-wrap items-center gap-1 mt-1">
+                    {[
+                      { label: "Today", offset: 0 },
+                      { label: "Tmrw", offset: 1 },
+                      { label: "+3d", offset: 3 },
+                    ].map((p) => (
+                      <button
+                        key={p.label}
+                        type="button"
+                        onClick={() => {
+                          const d = new Date();
+                          d.setDate(d.getDate() + p.offset);
+                          setFormStartDate(localYmd(d));
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-[10px] font-semibold text-zinc-700 dark:text-zinc-300 cursor-pointer"
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                    {formStartDate && (
+                      <button
+                        type="button"
+                        onClick={() => setFormStartDate("")}
+                        className="px-1.5 py-0.5 rounded text-[10px] font-semibold text-zinc-400 hover:text-red-600 cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1">
                     Due Date
                   </label>
                   <input
@@ -1415,8 +1632,44 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
                     onChange={(e) => setFormDueDate(e.target.value)}
                     className="brutal-input"
                   />
+                  <div className="flex flex-wrap items-center gap-1 mt-1">
+                    {[
+                      { label: "Today", offset: 0 },
+                      { label: "Tmrw", offset: 1 },
+                      { label: "+3d", offset: 3 },
+                      { label: "+1w", offset: 7 },
+                    ].map((p) => (
+                      <button
+                        key={p.label}
+                        type="button"
+                        onClick={() => {
+                          const d = new Date();
+                          d.setDate(d.getDate() + p.offset);
+                          setFormDueDate(localYmd(d));
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-[10px] font-semibold text-zinc-700 dark:text-zinc-300 cursor-pointer"
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                    {formDueDate && (
+                      <button
+                        type="button"
+                        onClick={() => setFormDueDate("")}
+                        className="px-1.5 py-0.5 rounded text-[10px] font-semibold text-zinc-400 hover:text-red-600 cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
+
+              {formStartDate && formDueDate && formStartDate > formDueDate && (
+                <p className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 dark:bg-amber-950/40 dark:border-amber-800 dark:text-amber-300 rounded-lg px-3 py-2">
+                  ⚠️ Start date ({formStartDate}) is after the due date ({formDueDate}).
+                </p>
+              )}
 
               {modalMode === "edit" && (
                 <div>

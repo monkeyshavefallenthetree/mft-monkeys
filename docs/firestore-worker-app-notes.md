@@ -29,3 +29,11 @@ Extend with **least privilege**, for example:
 
 - `exceptionRequests`: composite `workerId` + `createdAt` (desc) if you use server-side ordering (recommended).
 - `workSessions`: composite `workerId` + `date` for the “today’s session” query (app has a fallback path if missing).
+
+## HR-POL-2026 (worker side)
+
+- **Engine**: `src/lib/worker/hrPolicy2026.ts` must stay byte-identical to `mft-admin/src/lib/admin/hrPolicy2026.ts`.
+- **`permissionLedger`**: on the first clock-in of the day (policy enabled, workday) the app writes `{uid}_{date}_late` once (covered permission or uncovered lateness). The smart clock-out alert writes `{uid}_{date}_early`; re-clocking in the same day marks it `reversed`. Queries use the single field `workerId` and filter the cycle client-side (no composite index).
+- **`reimbursements` / `reimbursementAttachments`**: Expenses tab. Images are compressed in the browser (`src/lib/worker/imageCompress.ts`, ≤ ~300 KB JPEG) and stored as data URLs in their own collection (no Firebase Storage).
+- **`exceptionRequests.leaveDays`**: annual-leave length; validated against the accrual balance before submit.
+- Rules: see the HR-POL-2026 block in `mft-admin/docs/firestore-rules-recommended.rules`.

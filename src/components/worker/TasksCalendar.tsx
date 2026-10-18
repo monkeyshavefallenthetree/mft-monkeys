@@ -14,14 +14,20 @@ export default function TasksCalendar({ tasks, selectedDate, onSelectDate }: Pro
   const cursorDate = selectedDate || new Date();
   const [viewMonth, setViewMonth] = useState(new Date(cursorDate.getFullYear(), cursorDate.getMonth(), 1));
 
-  // Determine dots for this month
+  // Determine dots for this month (both startDate and dueDate)
   const datesWithTasks = useMemo(() => {
     const set = new Set<string>();
-    for (const t of tasks) {
-      if (!t.dueDate) continue;
-      const val = t.dueDate as any;
+    const addDate = (raw: unknown) => {
+      if (!raw) return;
+      const val = raw as any;
       const d = typeof val.toDate === "function" ? val.toDate() : new Date(val);
-      set.add(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
+      if (!isNaN(d.getTime())) {
+        set.add(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
+      }
+    };
+    for (const t of tasks) {
+      addDate(t.startDate);
+      addDate(t.dueDate);
     }
     return set;
   }, [tasks]);
@@ -93,7 +99,7 @@ export default function TasksCalendar({ tasks, selectedDate, onSelectDate }: Pro
           <span className="font-heading font-semibold text-lg text-zinc-900 dark:text-zinc-100">
             {viewMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}
           </span>
-          <p className="text-[11px] text-zinc-500 font-mono uppercase tracking-wider">Task Due Dates</p>
+          <p className="text-[11px] text-zinc-500 font-mono uppercase tracking-wider">Task Start &amp; Due Dates</p>
         </div>
         <button 
           onClick={nextMonth} 

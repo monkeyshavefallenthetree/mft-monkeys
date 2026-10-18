@@ -66,6 +66,8 @@ export async function submitException(
     reason: string;
     supportingEvidence: string | null;
     requestedAmount?: number | null;
+    /** HR-POL-2026 annual leave length in days (0.5 steps). */
+    leaveDays?: number | null;
   },
 ): Promise<string> {
   const ref = await addDoc(collection(db, "exceptionRequests"), {
@@ -73,5 +75,21 @@ export async function submitException(
     status: "pending",
     createdAt: serverTimestamp(),
   });
+
+  import("./adminNotifications")
+    .then(({ notifyAdmins }) =>
+      notifyAdmins(db, {
+        targetRoles: ["super_admin", "hr_admin"],
+        category: "hr",
+        eventType: "exception_submitted",
+        title: `📋 New ${payload.type.replace(/_/g, " ")} Request`,
+        body: `${payload.workerName} (${payload.exceptionDate}): ${payload.reason.slice(0, 80)}`,
+        href: "/admin/exceptions",
+        actorUid: payload.workerId,
+        actorName: payload.workerName,
+      }),
+    )
+    .catch(() => {});
+
   return ref.id;
 }

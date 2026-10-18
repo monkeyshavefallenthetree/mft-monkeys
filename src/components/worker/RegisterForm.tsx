@@ -54,7 +54,8 @@ export default function RegisterForm() {
   const [city, setCity] = useState("");
   const [skills, setSkills] = useState("");
   const [portfolioLink, setPortfolioLink] = useState("");
-  const [netspend, setNetspend] = useState("");
+  const [netspend] = useState("");
+  const [hireDate, setHireDate] = useState(() => new Date().toISOString().split("T")[0]);
 
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -134,6 +135,7 @@ export default function RegisterForm() {
 
       const resolvedRole = role === "other" ? customRole.trim() : role;
 
+      const todayYmd = new Date().toISOString().split("T")[0];
       await setDoc(doc(fb.db, "workers", user.uid), {
         uid: user.uid,
         firstName: firstName.trim(),
@@ -150,6 +152,8 @@ export default function RegisterForm() {
         portfolioLink: portfolioLink.trim(),
         netspend: netspend.trim(),
         skills: skillsArr,
+        hireDate: hireDate || todayYmd,
+        attendanceStartDate: todayYmd,
         startDate: serverTimestamp(),
         isActive: true,
         isWorker: true,
@@ -162,6 +166,22 @@ export default function RegisterForm() {
         totalTasks: 0,
         performanceNotes: [],
       });
+
+      const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+      await import("@/lib/worker/adminNotifications")
+        .then(({ notifyAdmins }) =>
+          notifyAdmins(fb.db, {
+            targetRoles: ["super_admin", "hr_admin"],
+            category: "hr",
+            eventType: "worker_registered",
+            title: `👤 New Hire Registration: ${fullName}`,
+            body: `${fullName} (${resolvedRole} · ${department}) registered and is awaiting HR approval.`,
+            href: "/admin/workers?status=pending",
+            actorUid: user.uid,
+            actorName: fullName,
+          }),
+        )
+        .catch(() => {});
 
       sessionStorage.removeItem("workerLoginTime");
       sessionStorage.removeItem("workerShiftMode");
@@ -475,6 +495,24 @@ export default function RegisterForm() {
                   className="brutal-input"
                 />
               </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="hireDate">
+                Company Joining Date (تاريخ الالتحاق بالشركة) *
+              </label>
+              <input
+                id="hireDate"
+                type="date"
+                value={hireDate}
+                max={new Date().toISOString().split("T")[0]}
+                onChange={(e) => setHireDate(e.target.value)}
+                required
+                className="brutal-input"
+              />
+              <p className="mt-1 text-[11px] text-zinc-500">
+                Already working with the company before this system? Pick your original company start date so your probation &amp; annual leave balance are calculated accurately. (HR can also adjust this later.)
+              </p>
             </div>
 
             <div>

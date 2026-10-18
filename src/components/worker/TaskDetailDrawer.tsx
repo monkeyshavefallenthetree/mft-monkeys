@@ -68,6 +68,23 @@ function formatDueDate(val: unknown): { formatted: string; isOverdue: boolean; l
   };
 }
 
+function formatStartDate(val: unknown): { formatted: string; hasStart: boolean } {
+  if (!val) return { formatted: "Immediate", hasStart: false };
+  let d: Date;
+  if (val && typeof (val as { toDate?: () => Date }).toDate === "function") {
+    d = (val as { toDate: () => Date }).toDate();
+  } else if (val instanceof Date) {
+    d = val;
+  } else {
+    d = new Date(String(val));
+  }
+  if (isNaN(d.getTime())) return { formatted: "Immediate", hasStart: false };
+  return {
+    formatted: d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }),
+    hasStart: true,
+  };
+}
+
 function formatExternalUrl(url?: string): string {
   if (!url) return "";
   const trimmed = url.trim();
@@ -114,6 +131,7 @@ export default function TaskDetailDrawer({
 
   const st = STATUS_CONFIG[task.status ?? "assigned"] ?? STATUS_CONFIG.assigned;
   const pr = PRIORITY_CONFIG[task.priority?.toLowerCase() ?? "medium"] ?? PRIORITY_CONFIG.medium;
+  const start = formatStartDate(task.startDate);
   const due = formatDueDate(task.dueDate);
 
   const assigneeIds = Array.from(
@@ -548,8 +566,18 @@ export default function TaskDetailDrawer({
                 </div>
               </div>
 
-              {/* Deadline & Meta Grid */}
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {/* Start Date, Deadline & Meta Grid */}
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+                <div className="rounded-xl border border-zinc-200 bg-white p-3.5 dark:border-zinc-800 dark:bg-zinc-800">
+                  <p className="text-[11px] font-medium text-zinc-500">Start Date</p>
+                  <p className="mt-1 text-sm font-semibold text-zinc-900 dark:text-white">{start.formatted}</p>
+                  {start.hasStart && (
+                    <span className="mt-1 inline-block rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-bold text-sky-700 dark:bg-sky-950/60 dark:text-sky-400">
+                      Scheduled
+                    </span>
+                  )}
+                </div>
+
                 <div className="rounded-xl border border-zinc-200 bg-white p-3.5 dark:border-zinc-800 dark:bg-zinc-800">
                   <p className="text-[11px] font-medium text-zinc-500">Deadline</p>
                   <p className="mt-1 text-sm font-semibold text-zinc-900 dark:text-white">{due.formatted}</p>

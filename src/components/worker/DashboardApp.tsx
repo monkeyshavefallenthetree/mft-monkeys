@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import { doc, getDoc, updateDoc, onSnapshot, query, collection, where } from "firebase/firestore";
 import type { Timestamp } from "firebase/firestore";
@@ -54,11 +54,40 @@ import { DashboardSkeleton } from "./Skeleton";
 import FirebaseSetupWarning from "./FirebaseSetupWarning";
 import { toast, confirmDialog } from "@/lib/worker/feedback";
 import { useTheme, type Theme } from "@/lib/worker/theme";
+import {
+  computeLeaveAccrual,
+  evaluateClockIn,
+  formatHm,
+  isPolicy2026Active,
+  minutesOfDay,
+  policyConfigFromSettings,
+  priorUsedRecordedOn,
+  requiredShiftEnd,
+  usageFromLedger,
+  validateLeaveRequest,
+  type ClockInEvaluation,
+  type CycleUsage,
+  type EarlyLeaveEvaluation,
+  type Policy2026Config,
+} from "@/lib/worker/hrPolicy2026";
+import {
+  chargeEarlyLeave,
+  chargeLatePermission,
+  reverseEarlyLeaveOnReturn,
+  subscribeCycleLedger,
+  type WorkerLedgerDoc,
+} from "@/lib/worker/permissions";
+import SmartClockOutModal, { type SmartClockOutChoice } from "./SmartClockOutModal";
+import SmartLateClockInModal, { type SmartLateClockInChoice } from "./SmartLateClockInModal";
+import PermissionLeaveCard from "./PermissionLeaveCard";
+import ExpensesPanel from "./ExpensesPanel";
+import PwaPushBanner from "./PwaPushBanner";
+import { sendWebPushToWorkers, showBackgroundNotification } from "@/lib/worker/webPush";
 
 const MARKETING =
   process.env.NEXT_PUBLIC_MARKETING_SITE_URL?.replace(/\/$/, "") ?? "";
 
-type Tab = "tasks" | "time" | "alerts" | "exceptions" | "profile";
+type Tab = "tasks" | "time" | "alerts" | "exceptions" | "expenses" | "profile";
 
 type WorkerDoc = {
   email?: string;
@@ -78,6 +107,11 @@ type WorkerDoc = {
   netspend?: string;
   createdAt?: Timestamp;
   lastLogin?: Timestamp;
+  /** HR-POL-2026 leave profile (set by admin). */
+  hireDate?: string;
+  attendanceStartDate?: string;
+  priorUsedLeaveDays?: number;
+  carriedOverLeaveDays?: number;
 };
 
 const SHIFT_MS = 8 * 60 * 60 * 1000;
@@ -121,6 +155,7 @@ const TABS: { id: Tab; label: string; short: string; icon: string }[] = [
   { id: "time", label: "Work Session", short: "Shift", icon: ICON.time },
   { id: "alerts", label: "HR Alerts", short: "Alerts", icon: ICON.alerts },
   { id: "exceptions", label: "Requests", short: "Requests", icon: ICON.exceptions },
+  { id: "expenses", label: "Expenses", short: "Expenses", icon: ICON.cash },
   { id: "profile", label: "Profile", short: "Profile", icon: ICON.profile },
 ];
 const TAB_IDS = TABS.map((t) => t.id);
@@ -203,7 +238,8 @@ export default function DashboardApp() {
   const [alertsLoading, setAlertsLoading] = useState(true);
   const [markingAll, setMarkingAll] = useState(false);
   const [chatNotifications, setChatNotifications] = useState<ChatNotification[]>([]);
-  const chatNotifCountRef = useRef(0);
+  const chatNotifCountRef = useRef(-1);
+  const seenChatNotifIds = useRef<Set<string> | null>(null);
   const [salaryEdit, setSalaryEdit] = useState(false);
   const [salaryVal, setSalaryVal] = useState("");
   const [exceptionType, setExceptionType] = useState("late");
@@ -220,6 +256,36 @@ export default function DashboardApp() {
   const sessionRef = useRef<WorkSessionState | null>(null);
   sessionRef.current = session;
   const loggingOutRef = useRef(false);
+
+  // HR-POL-2026: permission ledger, smart clock-out, smart late clock-in, and leave balance
+  const [ledger, setLedger] = useState<WorkerLedgerDoc[]>([]);
+  const [ledgerLoaded, setLedgerLoaded] = useState(false);
+  const [smartOut, setSmartOut] = useState<{ mode: "clockout" | "logout"; requiredEnd: Date } | null>(null);
+  const [smartLateIn, setSmartLateIn] = useState<{ clockIn: Date; overwrite?: boolean } | null>(null);
+  const [smartBusy, setSmartBusy] = useState(false);
+  const [leaveDays, setLeaveDays] = useState(1);
+  const policyCfg = useMemo(() => policyConfigFromSettings(hrSettings), [hrSettings]);
+  const policyActive = isPolicy2026Active(hrSettings, localYmd());
+  const policyUsage = useMemo(() => usageFromLedger(ledger), [ledger]);
+  const policyOffDay =
+    (hrSettings.weekendDays || [5, 6]).includes(new Date().getDay()) || !!isDateHoliday(localYmd(), holidays);
+  const policyRef = useRef<{ active: boolean; offDay: boolean; cfg: Policy2026Config; usage: CycleUsage }>({
+    active: false,
+    offDay: false,
+    cfg: policyCfg,
+    usage: policyUsage,
+  });
+  policyRef.current = { active: policyActive, offDay: policyOffDay, cfg: policyCfg, usage: policyUsage };
+
+  /** Required shift end if leaving now would be an early leave under HR-POL-2026, else null. */
+  const policyEarlyGate = useCallback((): Date | null => {
+    const p = policyRef.current;
+    const ws = sessionRef.current;
+    if (!p.active || p.offDay || !ws?.isActive) return null;
+    if (localYmd(ws.startTime) !== localYmd()) return null;
+    const end = requiredShiftEnd(ws.startTime, p.cfg);
+    return Date.now() < end.getTime() ? end : null;
+  }, []);
 
   // 2-Hour Routine Active Check-in
   const [showCheckInModal, setShowCheckInModal] = useState(false);
@@ -392,8 +458,10 @@ export default function DashboardApp() {
       lastSyncRef.current = Date.now();
       setLastSyncAt(new Date());
       playTerminalBeep();
+      // Same-day return after an early leave → refund that early-leave permission.
+      if (ws.priorMs > 0) void reverseEarlyLeaveOnReturn(fb.db, uid, localYmd());
       if (ws.priorMs > 60_000) {
-        toast.success("Welcome back â€” shift resumed", {
+        toast.success("Welcome back — shift resumed", {
           description: `${formatHM(ws.priorMs)} already logged today. Break time isn't counted.`,
         });
       } else {
@@ -425,9 +493,17 @@ export default function DashboardApp() {
     const fb = getFirebase();
     const ws = sessionRef.current;
     if (!opts?.silent) {
+      // HR-POL-2026: leaving before the required shift end → smart early-leave alert.
+      const gateEnd = policyEarlyGate();
+      if (gateEnd) {
+        setSmartOut({ mode: "clockout", requiredEnd: gateEnd });
+        return;
+      }
+    }
+    if (!opts?.silent) {
       const ok = await confirmDialog({
         title: "Clock out?",
-        message: `You've logged ${formatHM(workedMs(ws))} today. You'll stay signed in and can clock back in later â€” break time won't be counted.`,
+        message: `You've logged ${formatHM(workedMs(ws))} today. You'll stay signed in and can clock back in later — break time won't be counted.`,
         confirmLabel: "Clock out",
       });
       if (!ok) return;
@@ -458,10 +534,17 @@ export default function DashboardApp() {
     } finally {
       setShiftBusy(false);
     }
-  }, []);
+  }, [policyEarlyGate]);
 
   const handleLogout = useCallback(async (opts?: { silent?: boolean; reasonNotice?: string }) => {
     if (loggingOutRef.current) return;
+    if (!opts?.silent) {
+      const gateEnd = policyEarlyGate();
+      if (gateEnd) {
+        setSmartOut({ mode: "logout", requiredEnd: gateEnd });
+        return;
+      }
+    }
     if (!opts?.silent) {
       const onShift = !!sessionRef.current?.isActive;
       const ok = await confirmDialog({
@@ -503,7 +586,113 @@ export default function DashboardApp() {
       signOut(fb.auth).catch(() => {});
     }
     window.location.href = "/";
-  }, [teardownListeners, uid]);
+  }, [teardownListeners, uid, policyEarlyGate]);
+
+  /** Resolves the HR-POL-2026 smart clock-out alert. */
+  const onSmartChoice = useCallback(
+    async (choice: SmartClockOutChoice, ev: EarlyLeaveEvaluation) => {
+      const ctx = smartOut;
+      if (!ctx) return;
+      if (choice === "stay") {
+        setSmartOut(null);
+        return;
+      }
+      const fb = getFirebase();
+      const ws = sessionRef.current;
+      if ((choice === "permission" || choice === "deduct") && ev.isEarly && fb && uid && ws) {
+        setSmartBusy(true);
+        try {
+          const range = getPayrollCycleRange(ws.startTime, hrSettings.monthStartDay);
+          await chargeEarlyLeave(
+            fb.db,
+            {
+              uid,
+              name: `${profile?.firstName ?? ""} ${profile?.lastName ?? ""}`.trim() || (profile?.email ?? "Worker"),
+              email: profile?.email,
+            },
+            localYmd(ws.startTime),
+            range.startYmd,
+            ev,
+            choice === "permission",
+            formatHm(minutesOfDay(ctx.requiredEnd)),
+          );
+        } catch (e) {
+          console.error("early leave ledger failed", e);
+          toast.error("تعذر تسجيل الإذن", { description: "تحقق من الاتصال وحاول مرة أخرى." });
+          setSmartBusy(false);
+          return;
+        }
+        setSmartBusy(false);
+      }
+      setSmartOut(null);
+      const reason =
+        choice === "permission"
+          ? "تم الانصراف بإذن انصراف مبكر"
+          : choice === "deduct"
+            ? "تم الانصراف — سيُخصم الوقت المتبقي من الراتب"
+            : choice === "break"
+              ? "Break started — clock back in when you return"
+              : undefined;
+      if (ctx.mode === "logout") void handleLogout({ silent: true });
+      else void clockOut({ silent: true, reason });
+    },
+    [smartOut, uid, profile, hrSettings.monthStartDay, handleLogout, clockOut],
+  );
+
+  /** Resolves the HR-POL-2026 smart late clock-in choice (use permission vs. salary deduction). */
+  const onSmartLateChoice = useCallback(
+    async (choice: SmartLateClockInChoice, ev: ClockInEvaluation, penaltyDays: 0.25 | 0.5) => {
+      const ctx = smartLateIn;
+      const fb = getFirebase();
+      if (!ctx || !fb || !uid || !profile) return;
+      setSmartBusy(true);
+      try {
+        const date = localYmd(ctx.clockIn);
+        const range = getPayrollCycleRange(ctx.clockIn, hrSettings.monthStartDay);
+        const name = `${profile.firstName ?? ""} ${profile.lastName ?? ""}`.trim() || (profile.email ?? "Worker");
+        const usePermission = choice === "permission" && ev.covered;
+        await chargeLatePermission(fb.db, { uid, name, email: profile.email }, date, range.startYmd, ev, {
+          usePermission,
+          penaltyDays,
+          overwrite: true,
+        });
+        playTerminalBeep();
+        setSmartLateIn(null);
+        if (choice === "excuse") {
+          setExceptionType("late");
+          setTab("exceptions");
+          toast.info("تم فتح نموذج طلب استثناء", {
+            description: "اكتب سبب التأخير القهري لإرساله إلى الموارد البشرية.",
+          });
+        } else if (usePermission) {
+          toast.success("تم استخدام إذن تأخير صباحي ✓", {
+            description: `تم خصم ${ev.chargedMinutes} دقيقة من رصيد الأذونات الشهري (بدون أي خصم مالي من الراتب).`,
+            duration: 8000,
+          });
+        } else {
+          toast.warning("تم اختيار خصم التأخير من الراتب 💸", {
+            description: `تم الاحتفاظ برصيد أذوناتك الشهري كاملًا وتطبيق خصم التأخير (${penaltyDays === 0.5 ? "نصف يوم" : "ربع يوم"}).`,
+            duration: 8000,
+          });
+        }
+      } catch (e) {
+        console.error("late choice ledger failed", e);
+        const msg = e instanceof Error ? e.message : "";
+        const locked = /HR|same day/.test(msg);
+        if (locked) setSmartLateIn(null);
+        toast.error(locked ? "لا يمكن تغيير الاختيار" : "تعذر حفظ اختيار التأخير", {
+          description: msg.includes("HR")
+            ? "قامت الموارد البشرية بتعديل هذا السجل — تواصل معهم لأي تغيير."
+            : msg.includes("same day")
+              ? "يمكن تغيير اختيار التأخير في نفس اليوم فقط."
+              : "تحقق من الاتصال وحاول مرة أخرى.",
+        });
+      } finally {
+        setSmartBusy(false);
+      }
+    },
+    [smartLateIn, uid, profile, hrSettings.monthStartDay, setTab],
+  );
 
   const handleOvertimeSubmit = useCallback(async (requestedMins: number, reasonText: string) => {
     const fb = getFirebase();
@@ -583,6 +772,21 @@ export default function DashboardApp() {
           duration: 9000,
           action: { label: "Request overtime", onClick: () => openOvertime() },
         });
+        void showBackgroundNotification({
+          title: "15 minutes left in your shift ⏰",
+          body: "Wrap up, or request overtime if you need to keep going.",
+          tab: "time",
+          urgent: true,
+        });
+        if (fb && uid) {
+          void sendWebPushToWorkers(fb.db, {
+            recipientUids: [uid],
+            title: "15 minutes left in your shift ⏰",
+            body: "Wrap up, or request overtime if you need to keep going.",
+            tab: "time",
+            urgent: true,
+          });
+        }
       }
 
       // 2-hour Routine Active Presence Check-in
@@ -596,8 +800,21 @@ export default function DashboardApp() {
         setCheckInSecondsRemaining(CHECK_IN_WINDOW_SEC);
         checkInSecondsRef.current = CHECK_IN_WINDOW_SEC;
         playTerminalBeep({ force: true });
+        void showBackgroundNotification({
+          title: "2-Hour Presence Check-In Required ⚡",
+          body: "Confirm your active status within 10 minutes to avoid being marked Idle.",
+          tab: "time",
+          urgent: true,
+        });
         if (fb && uid) {
           loadTasksForWorker(fb.db, uid).then(setCheckInTasks).catch(() => {});
+          void sendWebPushToWorkers(fb.db, {
+            recipientUids: [uid],
+            title: "2-Hour Presence Check-In Required ⚡",
+            body: "Confirm your active status within 10 minutes to avoid being marked Idle.",
+            tab: "time",
+            urgent: true,
+          });
         }
       }
 
@@ -635,6 +852,21 @@ export default function DashboardApp() {
         playTerminalBeep();
         setShiftCompletedModalOpen(true);
         setAutoLogoutSeconds(120);
+        void showBackgroundNotification({
+          title: "Shift Complete — Clock Out Required 🏁",
+          body: "Your shift has reached the limit. Open MFT to clock out or request overtime.",
+          tab: "time",
+          urgent: true,
+        });
+        if (fb && uid) {
+          void sendWebPushToWorkers(fb.db, {
+            recipientUids: [uid],
+            title: "Shift Complete — Clock Out Required 🏁",
+            body: "Your shift has reached the limit. Open MFT to clock out or request overtime.",
+            tab: "time",
+            urgent: true,
+          });
+        }
       }
     }, tickMs);
     return () => window.clearInterval(id);
@@ -721,7 +953,7 @@ export default function DashboardApp() {
       setAutoLogoutSeconds((prev) => {
         if (prev <= 1) {
           window.clearInterval(timer);
-          void clockOut({ silent: true, reason: "Shift complete â€” clocked out automatically" });
+          void clockOut({ silent: true, reason: "Shift complete — clocked out automatically" });
           return 0;
         }
         return prev - 1;
@@ -749,7 +981,33 @@ export default function DashboardApp() {
     setIsProactiveOvertimeOpen(true);
   }
 
-  /** Live HR alerts â€” toast when a new one arrives. */
+  /** Service Worker notification click routing + clear app badge when foregrounded */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onSwMessage = (ev: MessageEvent) => {
+      const data = ev.data;
+      if (data && data.type === "MFT_NOTIFICATION_CLICK") {
+        if (data.tab && TAB_IDS.includes(data.tab as Tab)) {
+          setTab(data.tab as Tab);
+        }
+      }
+    };
+    const clearBadge = () => {
+      if (document.visibilityState === "visible") {
+        const nav = navigator as Navigator & { clearAppBadge?: () => Promise<void> };
+        nav.clearAppBadge?.().catch(() => {});
+      }
+    };
+    navigator.serviceWorker?.addEventListener("message", onSwMessage);
+    document.addEventListener("visibilitychange", clearBadge);
+    clearBadge();
+    return () => {
+      navigator.serviceWorker?.removeEventListener("message", onSwMessage);
+      document.removeEventListener("visibilitychange", clearBadge);
+    };
+  }, [setTab]);
+
+  /** Live HR alerts — toast when a new one arrives. */
   useEffect(() => {
     if (!uid) return;
     const fb = getFirebase();
@@ -769,6 +1027,14 @@ export default function DashboardApp() {
                 description: fresh.length > 1 ? `+${fresh.length - 1} more` : fresh[0].message?.slice(0, 120),
                 action: { label: "View", onClick: () => setTab("alerts") },
               });
+              if (document.hidden) {
+                void showBackgroundNotification({
+                  title: fresh[0].title || "New HR notice",
+                  body: fresh[0].message?.slice(0, 140) || "You have a new notice from HR.",
+                  tab: "alerts",
+                  urgent: fresh[0].priority === "high" || fresh[0].type === "urgent" || fresh[0].type === "penalty",
+                });
+              }
             }
           }
           known = new Set(rows.map((r) => r.id));
@@ -785,7 +1051,7 @@ export default function DashboardApp() {
     return () => unsub();
   }, [uid, registerUnsub, setTab]);
 
-  /** Live exception requests â€” toast when admin approves/rejects one. */
+  /** Live exception requests — toast when admin approves/rejects one. */
   useEffect(() => {
     if (!uid) return;
     const fb = getFirebase();
@@ -804,10 +1070,18 @@ export default function DashboardApp() {
               if (before && before !== now && (now === "approved" || now === "rejected")) {
                 playTerminalBeep();
                 const fn = now === "approved" ? toast.success : toast.error;
+                const desc = r.adminResponse ? String(r.adminResponse) : `For ${String(r.exceptionDate ?? "today")}`;
                 fn(`${exceptionLabel(r)} ${now}`, {
-                  description: r.adminResponse ? String(r.adminResponse) : `For ${String(r.exceptionDate ?? "today")}`,
+                  description: desc,
                   action: { label: "View", onClick: () => setTab("exceptions") },
                 });
+                if (document.hidden) {
+                  void showBackgroundNotification({
+                    title: `${exceptionLabel(r)} ${now}`,
+                    body: desc,
+                    tab: "exceptions",
+                  });
+                }
               }
             });
           }
@@ -842,32 +1116,174 @@ export default function DashboardApp() {
     if (!uid) return;
     const fb = getFirebase();
     if (!fb) return;
+    let first = true;
+    let known = new Set<string>();
     const unsubAdj = registerUnsub(
-      subscribeWorkerPayrollAdjustments(fb.db, uid, setAdjustments),
+      subscribeWorkerPayrollAdjustments(fb.db, uid, (rows) => {
+        if (!first) {
+          const fresh = rows.filter((r) => !known.has(r.id));
+          if (fresh[0]) {
+            playTerminalBeep();
+            const label = fresh[0].type === "allowance" ? "New Allowance / Bonus Added 💰" : "Payroll Adjustment Recorded";
+            const desc = `${fresh[0].reason || fresh[0].type}: ${fresh[0].amount} EGP`;
+            toast.info(label, {
+              description: desc,
+              action: { label: "View", onClick: () => setTab("profile") },
+            });
+            if (document.hidden) {
+              void showBackgroundNotification({ title: label, body: desc, tab: "profile" });
+            }
+          }
+        }
+        known = new Set(rows.map((r) => r.id));
+        first = false;
+        setAdjustments(rows);
+      }),
     );
     return () => unsubAdj();
-  }, [uid, registerUnsub]);
+  }, [uid, registerUnsub, setTab]);
 
-  /** Real-time Tasks Listener for Notifications */
+  /** Real-time Reimbursements Listener (notify when HR pre-approves, approves, or rejects a claim) */
+  useEffect(() => {
+    if (!uid) return;
+    const fb = getFirebase();
+    if (!fb) return;
+    const q = query(collection(fb.db, "reimbursements"), where("workerId", "==", uid));
+    let first = true;
+    let prevStages = new Map<string, string>();
+    const unsub = registerUnsub(
+      onSnapshot(
+        q,
+        (snap) => {
+          const nextStages = new Map<string, string>();
+          snap.docs.forEach((d) => {
+            const data = d.data();
+            const stg = String(data.stage || "");
+            nextStages.set(d.id, stg);
+            if (!first) {
+              const before = prevStages.get(d.id);
+              if (before && before !== stg) {
+                const titleText = String(data.title || "Expense claim");
+                if (stg === "pending_invoice") {
+                  playTerminalBeep();
+                  toast.success("Purchase Pre-Approved ✓", {
+                    description: `"${titleText}" was pre-approved! Upload the invoice when ready.`,
+                    action: { label: "Open", onClick: () => setTab("expenses") },
+                  });
+                  if (document.hidden) {
+                    void showBackgroundNotification({
+                      title: "Purchase Pre-Approved ✓",
+                      body: `"${titleText}" was pre-approved! Upload the invoice when ready.`,
+                      tab: "expenses",
+                    });
+                  }
+                } else if (stg === "approved") {
+                  playTerminalBeep();
+                  toast.success("Reimbursement Approved 🎉", {
+                    description: `"${titleText}" has been approved by HR.`,
+                    action: { label: "Open", onClick: () => setTab("expenses") },
+                  });
+                  if (document.hidden) {
+                    void showBackgroundNotification({
+                      title: "Reimbursement Approved 🎉",
+                      body: `"${titleText}" has been approved by HR.`,
+                      tab: "expenses",
+                    });
+                  }
+                } else if (stg === "rejected") {
+                  playTerminalBeep({ urgent: true });
+                  toast.error("Reimbursement Rejected", {
+                    description: `"${titleText}": ${String(data.rejectionReason || "See details in Expenses tab.")}`,
+                    action: { label: "Open", onClick: () => setTab("expenses") },
+                  });
+                  if (document.hidden) {
+                    void showBackgroundNotification({
+                      title: "Reimbursement Rejected",
+                      body: `"${titleText}": ${String(data.rejectionReason || "See details in Expenses tab.")}`,
+                      tab: "expenses",
+                      urgent: true,
+                    });
+                  }
+                }
+              }
+            }
+          });
+          prevStages = nextStages;
+          first = false;
+        },
+        () => {},
+      ),
+    );
+    return () => unsub();
+  }, [uid, registerUnsub, setTab]);
+
+  /** HR-POL-2026: live permission ledger for the current payroll cycle. */
+  useEffect(() => {
+    if (!uid) return;
+    const fb = getFirebase();
+    if (!fb) return;
+    const range = getPayrollCycleRange(new Date(), hrSettings.monthStartDay);
+    const unsub = registerUnsub(
+      subscribeCycleLedger(fb.db, uid, range.startYmd, range.endYmd, (rows) => {
+        setLedger(rows);
+        setLedgerLoaded(true);
+      }),
+    );
+    return () => unsub();
+  }, [uid, hrSettings.monthStartDay, registerUnsub]);
+
+  /**
+   * HR-POL-2026 late arrival prompt: once today's first clock-in is known and late,
+   * open SmartLateClockInModal so the worker chooses whether to use a monthly
+   * permission or accept the salary deduction.
+   */
+  const lateCheckedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!uid || !profile || !session || !ledgerLoaded || !policyActive || policyOffDay) return;
+    const date = localYmd(session.startTime);
+    if (date !== localYmd() || lateCheckedRef.current === date) return;
+    if (ledger.some((e) => e.date === date && e.kind === "late" && e.status === "applied")) {
+      lateCheckedRef.current = date;
+      return;
+    }
+    const ev = evaluateClockIn(session.startTime, usageFromLedger(ledger), policyCfg);
+    if (ev.status === "on-time") {
+      lateCheckedRef.current = date;
+      return;
+    }
+    lateCheckedRef.current = date;
+    playTerminalBeep();
+    setSmartLateIn({ clockIn: session.startTime, overwrite: false });
+  }, [uid, profile, session, ledgerLoaded, ledger, policyActive, policyOffDay, policyCfg]);
+
+  /** Real-time Tasks Listener for Notifications (matches both single-string and array assignedTo) */
   useEffect(() => {
     if (!uid) return;
     const fb = getFirebase();
     if (!fb) return;
 
-    const q = query(
-      collection(fb.db, "tasks"),
-      where("assignedTo", "array-contains", uid)
-    );
+    const q = collection(fb.db, "tasks");
 
     let isInitialRender = true;
     let prevStatus = new Map<string, string>();
+
+    const isTaskAssignedToUid = (data: Record<string, unknown>): boolean => {
+      const assignedTo = data.assignedTo;
+      if (typeof assignedTo === "string" && assignedTo === uid) return true;
+      if (Array.isArray(assignedTo) && assignedTo.includes(uid)) return true;
+      if (Array.isArray(data.assignedWorkerIds) && data.assignedWorkerIds.includes(uid)) return true;
+      if (data.workerId === uid) return true;
+      return false;
+    };
 
     const unsub = registerUnsub(onSnapshot(q, (snap) => {
       let pendingCount = 0;
       let completedCount = 0;
       let reviewCount = 0;
       const nextStatus = new Map<string, string>();
-      snap.docs.forEach((d) => {
+      const myDocs = snap.docs.filter((d) => isTaskAssignedToUid(d.data() as Record<string, unknown>));
+
+      myDocs.forEach((d) => {
         const s = d.data().status;
         nextStatus.set(d.id, String(s ?? ""));
         if (s === "assigned" || s === "in-progress") {
@@ -882,37 +1298,50 @@ export default function DashboardApp() {
       });
 
       if (!isInitialRender) {
-        const added = snap.docs.filter((d) => !prevStatus.has(d.id));
-        const approved = snap.docs.filter((d) => prevStatus.get(d.id) === "pending-approval" && nextStatus.get(d.id) === "completed");
-        const sentBack = snap.docs.filter(
+        const added = myDocs.filter((d) => !prevStatus.has(d.id) && d.data().createdBy !== uid);
+        const approved = myDocs.filter((d) => prevStatus.get(d.id) === "pending-approval" && nextStatus.get(d.id) === "completed");
+        const sentBack = myDocs.filter(
           (d) => prevStatus.get(d.id) === "pending-approval" && ["assigned", "in-progress"].includes(nextStatus.get(d.id) ?? ""),
         );
         const open = { label: "Open", onClick: () => setTab("tasks") };
         if (added.length) {
           playTerminalBeep();
-          toast.info(added.length > 1 ? `${added.length} new tasks assigned` : "New task assigned", {
-            description: added.length === 1 ? String(added[0]!.data().title ?? "") : "Check your Tasks tab.",
+          const title = added.length > 1 ? `${added.length} new tasks assigned` : "New task assigned 📋";
+          const desc = added.length === 1 ? String(added[0]!.data().title ?? "") : "Check your Tasks tab.";
+          toast.info(title, {
+            description: desc,
             action: open,
           });
+          if (document.hidden) {
+            void showBackgroundNotification({ title, body: desc, tab: "tasks" });
+          }
         }
         approved.forEach((d) => {
           playTerminalBeep();
-          toast.success("Task approved ðŸŽ‰", { description: String(d.data().title ?? ""), action: open });
+          const desc = String(d.data().title ?? "");
+          toast.success("Task approved 🎉", { description: desc, action: open });
+          if (document.hidden) {
+            void showBackgroundNotification({ title: "Task approved 🎉", body: desc, tab: "tasks" });
+          }
         });
         sentBack.forEach((d) => {
-          playTerminalBeep();
+          playTerminalBeep({ urgent: true });
+          const desc = `${String(d.data().title ?? "A task")} was sent back for revisions.`;
           toast.warning("Changes requested", {
-            description: `${String(d.data().title ?? "A task")} was sent back for revisions.`,
+            description: desc,
             action: open,
             duration: 8000,
           });
+          if (document.hidden) {
+            void showBackgroundNotification({ title: "Changes requested", body: desc, tab: "tasks", urgent: true });
+          }
         });
       }
 
       prevStatus = nextStatus;
       isInitialRender = false;
 
-      const totalCount = snap.docs.length;
+      const totalCount = myDocs.length;
       setTaskStats({
         total: totalCount,
         completed: completedCount,
@@ -937,11 +1366,26 @@ export default function DashboardApp() {
     try {
       unsub = registerUnsub(subscribeChatNotifications(fb.db, uid, (notifs) => {
         setChatNotifications(notifs);
-        if (notifs.length > chatNotifCountRef.current && chatNotifCountRef.current >= 0) {
-          const newest = notifs[0];
-          if (newest) {
-            playTerminalBeep();
-            toast.info(`Message from ${newest.senderName}`, { description: newest.messagePreview });
+        if (seenChatNotifIds.current === null) {
+          seenChatNotifIds.current = new Set(notifs.map((n) => n.id));
+        } else {
+          for (const n of notifs) {
+            if (!seenChatNotifIds.current.has(n.id)) {
+              seenChatNotifIds.current.add(n.id);
+              playTerminalBeep();
+              toast.info(`💬 Message from ${n.senderName}`, {
+                description: `${n.taskTitle}: ${n.messagePreview}`,
+                action: { label: "View", onClick: () => setTab("tasks") },
+              });
+              if (document.hidden) {
+                void showBackgroundNotification({
+                  title: `Message from ${n.senderName}`,
+                  body: `${n.taskTitle}: ${n.messagePreview}`,
+                  tab: "tasks",
+                  taskId: n.taskId,
+                });
+              }
+            }
           }
         }
         chatNotifCountRef.current = notifs.length;
@@ -951,7 +1395,7 @@ export default function DashboardApp() {
     }
 
     return () => unsub?.();
-  }, [uid, registerUnsub]);
+  }, [uid, registerUnsub, setTab]);
 
   const handleNewAdminMessage = useCallback(() => {
     playTerminalBeep();
@@ -1040,6 +1484,33 @@ export default function DashboardApp() {
       toast.warning("Please specify a valid requested salary advance amount.");
       return;
     }
+    const leaveDaysRaw = fd.get("leaveDays");
+    const leaveDaysVal = leaveDaysRaw ? parseFloat(String(leaveDaysRaw)) : null;
+    if (type === "annual_leave" && policyRef.current.active) {
+      // HR-POL-2026: no annual leave during probation, no negative balance, 0.5-day steps.
+      const hire = profile.hireDate || (profile.createdAt?.toDate ? localYmd(profile.createdAt.toDate()) : null);
+      if (hire) {
+        const booked = exceptions
+          .filter((x) => x.type === "annual_leave" && (!x.status || x.status === "pending" || x.status === "approved"))
+          .map((x) => ({ date: String(x.exceptionDate ?? ""), days: Number(x.leaveDays) || 1 }));
+        const acc = computeLeaveAccrual(
+          hire,
+          new Date(),
+          {
+            usedLeave: booked,
+            carriedOverApproved: Number(profile.carriedOverLeaveDays) || 0,
+            priorUsedLeaveDays: Number(profile.priorUsedLeaveDays) || 0,
+            priorUsedAsOf: priorUsedRecordedOn(profile, hrSettings),
+          },
+          policyRef.current.cfg,
+        );
+        const verdict = validateLeaveRequest(acc, leaveDaysVal || 0);
+        if (!verdict.ok) {
+          toast.warning("لا يمكن تقديم طلب الإجازة", { description: verdict.reasonAr, duration: 9000 });
+          return;
+        }
+      }
+    }
     if (!reason) {
       toast.warning("Please add a short reason so HR can review it.");
       return;
@@ -1057,6 +1528,7 @@ export default function DashboardApp() {
         reason: type === "advance_request" ? `[Salary Advance $${requestedAmount}]: ${reason}` : reason,
         supportingEvidence,
         requestedAmount: type === "advance_request" ? requestedAmount : null,
+        leaveDays: type === "annual_leave" ? leaveDaysVal || 1 : null,
       });
 
       const extendsToday = type === "overtime" && !!lateMinutes && exceptionDate === localYmd();
@@ -1070,6 +1542,7 @@ export default function DashboardApp() {
       form.reset();
       setExceptionType("late");
       setAdvanceAmount(500);
+      setLeaveDays(1);
       const dateEl = form.elements.namedItem("exceptionDate") as HTMLInputElement | null;
       if (dateEl) dateEl.value = localYmd();
       toast.success(
@@ -1140,6 +1613,32 @@ export default function DashboardApp() {
     .filter((a) => a.type === "allowance" && a.status !== "cancelled")
     .reduce((acc, a) => acc + (Number(a.amount) || 0), 0);
 
+  // HR-POL-2026 derived values (Time tab card)
+  const todayRequiredEnd = firstClockIn && localYmd(firstClockIn) === todayYmd ? requiredShiftEnd(firstClockIn, policyCfg) : null;
+  const hireFromProfile = profile.hireDate || null;
+  const hireFallback = !hireFromProfile && profile.createdAt?.toDate ? localYmd(profile.createdAt.toDate()) : null;
+  const bookedLeave = exceptions
+    .filter((x) => x.type === "annual_leave" && x.status === "approved")
+    .map((x) => ({ date: String(x.exceptionDate ?? ""), days: Number(x.leaveDays) || 1 }));
+  const effectiveHire = hireFromProfile ?? hireFallback;
+  const leaveAccrual = effectiveHire
+    ? computeLeaveAccrual(
+        effectiveHire,
+        new Date(),
+        {
+          usedLeave: bookedLeave,
+          carriedOverApproved: Number(profile.carriedOverLeaveDays) || 0,
+          priorUsedLeaveDays: Number(profile.priorUsedLeaveDays) || 0,
+          priorUsedAsOf: priorUsedRecordedOn(profile, hrSettings),
+        },
+        policyCfg,
+      )
+    : null;
+  const todayLateEntry = ledger.find((e) => e.date === todayYmd && e.kind === "late" && e.status === "applied") ?? null;
+  const usageBeforeTodayLate = usageFromLedger(
+    ledger.filter((e) => !(e.date === todayYmd && e.kind === "late")),
+  );
+
   const firstName = profile.firstName || "there";
 
   const unreadAlerts = alerts.filter((a) => !a.isRead).length;
@@ -1148,7 +1647,7 @@ export default function DashboardApp() {
 
   return (
     <div className="min-h-[100dvh] pb-24 lg:pb-12 bg-[var(--mft-bg)]">
-      {/* â”€â”€ Top Header Bar â”€â”€ */}
+      {/* ── Top Header Bar ── */}
       <header className="sticky top-0 z-30 border-b border-zinc-200 bg-white/95 backdrop-blur-md dark:border-zinc-800 dark:bg-zinc-900/95">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
           {/* Logo & Identity */}
@@ -1222,7 +1721,7 @@ export default function DashboardApp() {
             <div className="hidden md:flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50/90 py-1 pl-3 pr-1 dark:border-amber-900/60 dark:bg-amber-950/40">
               <span className="inline-flex h-2 w-2 rounded-full bg-amber-500" />
               <span className="text-xs font-medium text-amber-800 dark:text-amber-200">
-                Not clocked in{durationMs > 60_000 ? ` Â· ${formatHM(durationMs)} today` : ""}
+                Not clocked in{durationMs > 60_000 ? ` · ${formatHM(durationMs)} today` : ""}
               </span>
               <button
                 type="button"
@@ -1230,7 +1729,7 @@ export default function DashboardApp() {
                 disabled={shiftBusy}
                 className="ml-1 inline-flex items-center gap-1 rounded-full bg-emerald-600 px-3 py-1 text-[11px] font-bold text-white shadow-sm transition-colors hover:bg-emerald-500 disabled:opacity-60 cursor-pointer"
               >
-                <Icon d={ICON.play} className="h-3.5 w-3.5" /> {shiftBusy ? "Startingâ€¦" : "Clock in"}
+                <Icon d={ICON.play} className="h-3.5 w-3.5" /> {shiftBusy ? "Starting…" : "Clock in"}
               </button>
             </div>
           )}
@@ -1311,7 +1810,7 @@ export default function DashboardApp() {
           </div>
         </div>
 
-        {/* â”€â”€ Sub Navigation Tabs â”€â”€ */}
+        {/* ── Sub Navigation Tabs ── */}
         <nav
           className="mx-auto hidden max-w-6xl gap-1 px-4 sm:px-6 lg:flex overflow-x-auto"
           aria-label="Dashboard sections"
@@ -1380,8 +1879,10 @@ export default function DashboardApp() {
         </div>
       )}
 
-      {/* â”€â”€ Main Content Area â”€â”€ */}
+      {/* ── Main Content Area ── */}
       <main className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6">
+        <PwaPushBanner db={firebaseClient.db} uid={uid} workerName={firstName} />
+
         {/* TAB: TASKS (home) */}
         {tab === "tasks" && (
           <section aria-labelledby="tasks-heading" className="space-y-6">
@@ -1401,7 +1902,7 @@ export default function DashboardApp() {
                       ? <>You have <span className="font-semibold text-white">{taskStats.pending} open task{taskStats.pending === 1 ? "" : "s"}</span>{taskStats.review > 0 ? <> and {taskStats.review} waiting for review</> : null}.</>
                       : taskStats.review > 0
                         ? <>{taskStats.review} task{taskStats.review === 1 ? " is" : "s are"} waiting for admin review.</>
-                        : <>You&apos;re all caught up â€” no open tasks right now.</>}
+                        : <>You&apos;re all caught up — no open tasks right now.</>}
                   </p>
                 </div>
 
@@ -1440,7 +1941,7 @@ export default function DashboardApp() {
                       disabled={shiftBusy}
                       className="ml-1 inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3 py-2 text-xs font-bold text-white shadow-lg shadow-emerald-900/40 transition-colors hover:bg-emerald-400 disabled:opacity-60 cursor-pointer"
                     >
-                      <Icon d={ICON.play} /> {shiftBusy ? "Startingâ€¦" : "Clock in"}
+                      <Icon d={ICON.play} /> {shiftBusy ? "Starting…" : "Clock in"}
                     </button>
                   )}
                 </div>
@@ -1472,6 +1973,68 @@ export default function DashboardApp() {
                     <div key={s.label} className="rounded-xl bg-white/5 px-3.5 py-2.5 ring-1 ring-white/10">{inner}</div>
                   );
                 })}
+              </div>
+            </div>
+
+            {/* HR-POL-2026 Quick Access Bar (Permissions, Leave, Overtime & Expenses) */}
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-zinc-200 bg-white p-4 shadow-xs dark:border-zinc-800 dark:bg-zinc-900">
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setTab("time")}
+                  className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 cursor-pointer"
+                >
+                  <span>⏱️</span>
+                  <span>
+                    الأذونات الشهرية:{" "}
+                    <strong className="font-mono text-red-600 dark:text-red-400">
+                      {Math.max(0, policyCfg.permissionMaxCount - policyUsage.count)}/{policyCfg.permissionMaxCount}
+                    </strong>{" "}
+                    ({Math.max(0, policyCfg.permissionMaxMinutes - policyUsage.minutes)}m left)
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTab("time")}
+                  className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 cursor-pointer"
+                >
+                  <span>🌴</span>
+                  <span>
+                    رصيد الإجازات السنوية:{" "}
+                    <strong className="font-mono text-emerald-600 dark:text-emerald-400">
+                      {leaveAccrual ? `${leaveAccrual.balance} يوم` : "عرض الرصيد"}
+                    </strong>
+                  </span>
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExceptionType("annual_leave");
+                    setTab("exceptions");
+                  }}
+                  className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300 cursor-pointer"
+                >
+                  🌴 طلب إجازة / Leave
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExceptionType("overtime");
+                    setTab("exceptions");
+                  }}
+                  className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-800 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300 cursor-pointer"
+                >
+                  🌙 طلب إضافي / Overtime
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTab("expenses")}
+                  className="rounded-xl border border-sky-300 bg-sky-50 px-3 py-1.5 text-xs font-bold text-sky-800 hover:bg-sky-100 dark:border-sky-800 dark:bg-sky-950/50 dark:text-sky-300 cursor-pointer"
+                >
+                  🚕 مصروف أو مأمورية / Expense
+                </button>
               </div>
             </div>
 
@@ -1546,7 +2109,7 @@ export default function DashboardApp() {
                 </h2>
                 <p className="mx-auto mt-2 max-w-md text-sm text-zinc-500 dark:text-zinc-400 leading-relaxed">
                   {durationMs > 60_000
-                    ? <>You&apos;ve logged <strong className="text-zinc-800 dark:text-zinc-200">{formatHM(durationMs)}</strong> today. Clock back in to continue â€” break time isn&apos;t counted.</>
+                    ? <>You&apos;ve logged <strong className="text-zinc-800 dark:text-zinc-200">{formatHM(durationMs)}</strong> today. Clock back in to continue — break time isn&apos;t counted.</>
                     : "You can browse tasks and notices freely. Clock in when you're ready to start your 8-hour shift."}
                 </p>
                 {durationMs > 0 && (
@@ -1554,7 +2117,7 @@ export default function DashboardApp() {
                     <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
                       <div className="h-full rounded-full bg-amber-500 transition-all duration-500" style={{ width: `${shiftPct}%` }} />
                     </div>
-                    <p className="mt-1.5 text-[11px] font-medium text-zinc-500">{shiftPct}% of today&apos;s shift Â· {formatHM(remainingMs)} remaining</p>
+                    <p className="mt-1.5 text-[11px] font-medium text-zinc-500">{shiftPct}% of today&apos;s shift · {formatHM(remainingMs)} remaining</p>
                   </div>
                 )}
                 <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
@@ -1565,7 +2128,7 @@ export default function DashboardApp() {
                     className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-emerald-600/20 hover:bg-emerald-500 active:scale-95 disabled:opacity-60 transition-all cursor-pointer"
                   >
                     <Icon d={ICON.play} className="h-5 w-5" />
-                    {shiftBusy ? "Startingâ€¦" : durationMs > 60_000 ? "Resume shift" : "Clock in & start shift"}
+                    {shiftBusy ? "Starting…" : durationMs > 60_000 ? "Resume shift" : "Clock in & start shift"}
                   </button>
                 </div>
               </div>
@@ -1583,7 +2146,7 @@ export default function DashboardApp() {
                 <div className="mx-auto mt-5 max-w-md">
                   <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-500 mb-1.5">
                     <span>{shiftPct}% complete</span>
-                    <span>{formatHM(remainingMs)} left{overtimeMinutes > 0 ? ` Â· incl. +${overtimeMinutes}m OT` : ""}</span>
+                    <span>{formatHM(remainingMs)} left{overtimeMinutes > 0 ? ` · incl. +${overtimeMinutes}m OT` : ""}</span>
                   </div>
                   <div className="h-2.5 w-full overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
                     <div
@@ -1595,7 +2158,7 @@ export default function DashboardApp() {
 
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-xs">
                   <span className="inline-flex items-center rounded-full bg-zinc-100 px-3 py-1 font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                    Started {firstClockIn ? firstClockIn.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "â€”"}
+                    Started {firstClockIn ? firstClockIn.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}
                   </span>
                   <span className="inline-flex items-center rounded-full bg-zinc-100 px-3 py-1 font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
                     Ends ~{new Date(Date.now() + remainingMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -1647,11 +2210,44 @@ export default function DashboardApp() {
                       No check-in recorded yet today.
                     </div>
                   ) : isLate ? (
-                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
-                      <span>Checked in after {latenessInfo.graceEndTimeStr} (+{latenessInfo.lateMinutes}m late).</span>
-                      <button type="button" onClick={() => setTab("exceptions")} className="font-semibold underline underline-offset-2 cursor-pointer">
-                        Submit excuse →
-                      </button>
+                    <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span>Checked in after {latenessInfo.graceEndTimeStr} (+{latenessInfo.lateMinutes}m late).</span>
+                        {todayLateEntry && (
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                              todayLateEntry.covered
+                                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+                                : "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300"
+                            }`}
+                          >
+                            {todayLateEntry.covered
+                              ? `✓ مغطى بإذن (${todayLateEntry.chargedMinutes} د)`
+                              : `💸 خصم من الراتب (${todayLateEntry.fallbackPenaltyDays || 0.25} يوم)`}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        {policyActive && todayLateEntry?.source !== "admin" && (
+                          <button
+                            type="button"
+                            onClick={() => setSmartLateIn({ clockIn: firstClockIn, overwrite: true })}
+                            className="rounded-lg bg-amber-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-amber-500 cursor-pointer"
+                          >
+                            🔄 {todayLateEntry ? "تغيير الاختيار (إذن / خصم)" : "اختيار: إذن أم خصم؟"}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setExceptionType("late");
+                            setTab("exceptions");
+                          }}
+                          className="font-semibold underline underline-offset-2 cursor-pointer"
+                        >
+                          Submit excuse →
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <div className="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-xs text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300">
@@ -1714,6 +2310,33 @@ export default function DashboardApp() {
                 </div>
               </div>
             </div>
+
+            {/* HR-POL-2026 permissions & leave */}
+            <PermissionLeaveCard
+              cfg={policyCfg}
+              policyActive={policyActive}
+              effectiveFrom={hrSettings.policy2026EffectiveFrom ?? ""}
+              usage={policyUsage}
+              ledger={ledger}
+              requiredEnd={todayRequiredEnd}
+              now={new Date()}
+              hireDate={hireFromProfile ?? hireFallback}
+              hireDateIsFallback={!hireFromProfile && !!hireFallback}
+              usedLeave={bookedLeave}
+              priorUsedLeaveDays={Number(profile.priorUsedLeaveDays) || 0}
+              priorUsedAsOf={priorUsedRecordedOn(profile, hrSettings)}
+              carriedOver={Number(profile.carriedOverLeaveDays) || 0}
+              cycleLabel={cycleRange.label}
+              onRequestLeave={() => {
+                setExceptionType("annual_leave");
+                setTab("exceptions");
+              }}
+              onRequestOvertime={() => {
+                setExceptionType("overtime");
+                setTab("exceptions");
+              }}
+              onOpenExpenses={() => setTab("expenses")}
+            />
           </section>
         )}
 
@@ -1737,7 +2360,7 @@ export default function DashboardApp() {
                     className="brutal-btn-outline"
                   >
                     <Icon d={ICON.check} className="h-3.5 w-3.5" />
-                    {markingAll ? "Updatingâ€¦" : "Mark all as read"}
+                    {markingAll ? "Updating…" : "Mark all as read"}
                   </button>
                 </div>
               )}
@@ -1777,7 +2400,7 @@ export default function DashboardApp() {
                           </span>
                           {a.priority && (
                             <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wide">
-                              Â· {a.priority}
+                              · {a.priority}
                             </span>
                           )}
                         </div>
@@ -1945,6 +2568,27 @@ export default function DashboardApp() {
                     </div>
                   )}
 
+                  {exceptionType === "annual_leave" && (
+                    <div dir="rtl">
+                      <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="leaveDays">
+                        عدد أيام الإجازة (بمضاعفات نصف يوم) *
+                      </label>
+                      <input
+                        id="leaveDays"
+                        name="leaveDays"
+                        type="number"
+                        min={0.5}
+                        max={30}
+                        step={0.5}
+                        value={leaveDays}
+                        onChange={(e) => setLeaveDays(Number(e.target.value) || 0)}
+                        required
+                        className="brutal-input"
+                      />
+                      <p className="mt-1 text-[11px] text-zinc-500">يبدأ من «التاريخ الفعلي» أدناه. يتم التحقق من رصيدك وفق لائحة HR-POL-2026 (لا إجازة سنوية خلال فترة الاختبار).</p>
+                    </div>
+                  )}
+
                   {["annual_leave", "sick_leave", "emergency_leave"].includes(exceptionType) && (
                     <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-3.5 text-xs text-blue-900 dark:border-blue-900/40 dark:bg-blue-950/30 dark:text-blue-300">
                       ℹ️ <strong>Official Leave Request:</strong> Submitting this request allows HR to excuse your absence on this date without deducting penalty multipliers from your payroll.
@@ -1974,7 +2618,7 @@ export default function DashboardApp() {
                       name="exceptionReason"
                       required
                       rows={3}
-                      placeholder="Explain the reason for this exception requestâ€¦"
+                      placeholder="Explain the reason for this exception request…"
                       className="brutal-input resize-none"
                     />
                   </div>
@@ -1997,7 +2641,7 @@ export default function DashboardApp() {
                     disabled={exceptionSubmitting}
                     className="brutal-btn w-full"
                   >
-                    {exceptionSubmitting ? "Sendingâ€¦" : "Send request to HR"}
+                    {exceptionSubmitting ? "Sending…" : "Send request to HR"}
                   </button>
                 </form>
               </div>
@@ -2063,8 +2707,8 @@ export default function DashboardApp() {
                           </div>
                         )}
                         <div className="mt-3 flex items-center justify-between text-[11px] text-zinc-400 border-t border-zinc-200/60 dark:border-zinc-800 pt-2">
-                          <span>For: {String(ex.exceptionDate ?? "â€”")}</span>
-                          <span>Submitted: {toDate(ex.createdAt as Timestamp | undefined)?.toLocaleDateString() ?? "â€”"}</span>
+                          <span>For: {String(ex.exceptionDate ?? "—")}</span>
+                          <span>Submitted: {toDate(ex.createdAt as Timestamp | undefined)?.toLocaleDateString() ?? "—"}</span>
                         </div>
                       </div>
                     ))}
@@ -2073,6 +2717,18 @@ export default function DashboardApp() {
               </div>
             </div>
           </section>
+        )}
+
+        {/* TAB: EXPENSES (HR-POL-2026 clause 5) */}
+        {tab === "expenses" && (
+          <ExpensesPanel
+            db={firebaseClient.db}
+            worker={{
+              uid,
+              name: `${profile.firstName ?? ""} ${profile.lastName ?? ""}`.trim() || (profile.email ?? "Worker"),
+              email: profile.email,
+            }}
+          />
         )}
 
         {/* TAB: PROFILE */}
@@ -2129,7 +2785,7 @@ export default function DashboardApp() {
                 <div className="rounded-xl border border-zinc-200 bg-zinc-50/50 p-4 dark:border-zinc-800 dark:bg-zinc-900/50">
                   <p className="text-[11px] font-medium text-zinc-500">Member Since</p>
                   <p className="mt-1 text-sm font-semibold text-zinc-900 dark:text-white">
-                    {profile.createdAt ? toDate(profile.createdAt)?.toLocaleDateString() : "â€”"}
+                    {profile.createdAt ? toDate(profile.createdAt)?.toLocaleDateString() : "—"}
                   </p>
                 </div>
 
@@ -2203,8 +2859,8 @@ export default function DashboardApp() {
                       rel="noreferrer"
                       className="inline-flex items-center gap-1.5 text-xs font-semibold text-red-600 hover:underline"
                     >
-                      <span>ðŸ”— {profile.portfolioLink}</span>
-                      <span>â†—</span>
+                      <span>🔗 {profile.portfolioLink}</span>
+                      <span>↗</span>
                     </a>
                   ) : (
                     <p className="text-xs text-zinc-400">No portfolio link provided.</p>
@@ -2277,7 +2933,7 @@ export default function DashboardApp() {
         )}
       </main>
 
-      {/* â”€â”€ MODAL: Session Start Mode Choice (Clock In vs Browse Mode) â”€â”€ */}
+      {/* ── MODAL: Session Start Mode Choice (Clock In vs Browse Mode) ── */}
       {showShiftChoiceModal && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/65 backdrop-blur-sm animate-fade-in"
@@ -2307,7 +2963,7 @@ export default function DashboardApp() {
                   <Icon d={ICON.play} className="h-5 w-5" />
                 </span>
                 <span className="mt-3 text-sm font-bold text-zinc-900 dark:text-white">
-                  {shiftBusy ? "Startingâ€¦" : durationMs > 60_000 ? "Resume my shift" : "Clock in & start shift"}
+                  {shiftBusy ? "Starting…" : durationMs > 60_000 ? "Resume my shift" : "Clock in & start shift"}
                 </span>
                 <span className="mt-1 text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
                   Starts your 8-hour clock and records today&apos;s attendance.
@@ -2333,7 +2989,7 @@ export default function DashboardApp() {
         </div>
       )}
 
-      {/* â”€â”€ MODAL: 8-Hour Shift Completion & Overtime Request â”€â”€ */}
+      {/* ── MODAL: 8-Hour Shift Completion & Overtime Request ── */}
       {shiftCompletedModalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fade-in"
@@ -2372,7 +3028,7 @@ export default function DashboardApp() {
                   </div>
                   <div className="flex justify-between">
                     <span className="text-zinc-400">First clock-in</span>
-                    <span>{firstClockIn ? firstClockIn.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "â€”"}</span>
+                    <span>{firstClockIn ? firstClockIn.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-zinc-400">Status</span>
@@ -2395,7 +3051,7 @@ export default function DashboardApp() {
                   <button
                     type="button"
                     autoFocus
-                    onClick={() => void clockOut({ silent: true, reason: "Shift complete â€” clocked out" })}
+                    onClick={() => void clockOut({ silent: true, reason: "Shift complete — clocked out" })}
                     disabled={shiftBusy}
                     className="inline-flex items-center justify-center gap-2 rounded-xl bg-zinc-900 py-3 text-xs font-bold text-white hover:bg-zinc-800 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200 active:scale-95 disabled:opacity-60 transition-all cursor-pointer"
                   >
@@ -2477,7 +3133,7 @@ export default function DashboardApp() {
                     disabled={overtimeSubmitting || !overtimeReason.trim()}
                     className="rounded-xl bg-amber-600 px-5 py-2.5 text-xs font-bold text-white shadow-md shadow-amber-600/20 hover:bg-amber-500 disabled:opacity-50 active:scale-95 transition-all cursor-pointer"
                   >
-                    {overtimeSubmitting ? "Submittingâ€¦" : `Submit & Extend (+${overtimeRequestedMins}m)`}
+                    {overtimeSubmitting ? "Submitting…" : `Submit & Extend (+${overtimeRequestedMins}m)`}
                   </button>
                 </div>
               </form>
@@ -2486,7 +3142,7 @@ export default function DashboardApp() {
         </div>
       )}
 
-      {/* â”€â”€ MODAL: Proactive Overtime Request (From Time Tab) â”€â”€ */}
+      {/* ── MODAL: Proactive Overtime Request (From Time Tab) ── */}
       {isProactiveOvertimeOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in"
@@ -2581,12 +3237,39 @@ export default function DashboardApp() {
                   disabled={overtimeSubmitting || !overtimeReason.trim()}
                   className="rounded-xl bg-amber-600 px-5 py-2.5 text-xs font-bold text-white shadow-md shadow-amber-600/20 hover:bg-amber-500 disabled:opacity-50 active:scale-95 transition-all cursor-pointer"
                 >
-                  {overtimeSubmitting ? "Submittingâ€¦" : `Submit Request (+${overtimeRequestedMins}m)`}
+                  {overtimeSubmitting ? "Submitting…" : `Submit Request (+${overtimeRequestedMins}m)`}
                 </button>
               </div>
             </form>
           </div>
         </div>
+      )}
+
+      {/* HR-POL-2026 smart early clock-out alert */}
+      {smartOut && (
+        <SmartClockOutModal
+          requiredEnd={smartOut.requiredEnd}
+          usage={policyUsage}
+          cfg={policyCfg}
+          hourlyRate={hrSettings.defaultHourlyRate || 31.25}
+          mode={smartOut.mode}
+          busy={smartBusy}
+          onChoose={(c, ev) => void onSmartChoice(c, ev)}
+        />
+      )}
+
+      {/* HR-POL-2026 smart late clock-in choice (use permission vs. salary deduction) */}
+      {smartLateIn && (
+        <SmartLateClockInModal
+          clockIn={smartLateIn.clockIn}
+          usage={usageBeforeTodayLate}
+          cfg={policyCfg}
+          hourlyRate={hrSettings.defaultHourlyRate || 31.25}
+          busy={smartBusy}
+          currentCoveredChoice={todayLateEntry ? todayLateEntry.covered : null}
+          onChoose={(c, ev, penaltyDays) => void onSmartLateChoice(c, ev, penaltyDays)}
+          onClose={smartLateIn.overwrite ? () => setSmartLateIn(null) : undefined}
+        />
       )}
 
       {/* Active Presence Check-in Modal (Every 2 Hours) */}
@@ -2599,7 +3282,7 @@ export default function DashboardApp() {
         onConfirm={handleConfirmCheckIn}
       />
 
-      {/* â”€â”€ Mobile Bottom Navigation Bar â”€â”€ */}
+      {/* ── Mobile Bottom Navigation Bar ── */}
       <nav
         className="fixed bottom-0 left-0 right-0 z-40 flex border-t border-zinc-200 bg-white/95 px-1 py-1 pb-[max(0.25rem,env(safe-area-inset-bottom))] lg:hidden dark:border-zinc-800 dark:bg-zinc-900/95 backdrop-blur-md"
         aria-label="Mobile navigation"
