@@ -8,6 +8,8 @@ import { assignedWorkerIds, sanitizeSubtask, sanitizeSubtasks } from "@/lib/work
 import TaskChat from "./TaskChat";
 import LinkifiedText from "./LinkifiedText";
 import { toast } from "@/lib/worker/feedback";
+import { notifyAdmins } from "@/lib/worker/adminNotifications";
+import { sendWebPushToWorkers } from "@/lib/worker/webPush";
 
 interface Props {
   db: Firestore;
@@ -180,12 +182,40 @@ export default function TaskDetailDrawer({
     setSubtasksBusy(true);
     try {
       const current = sanitizeSubtasks(task.subtasks);
+      const targetSt = current.find((s) => s.id === subtaskId);
+      const nextCompleted = targetSt ? !targetSt.completed : true;
       const updated = current.map((st) =>
         st.id === subtaskId ? { ...st, completed: !st.completed } : st,
       );
       await updateDoc(doc(db, "tasks", task.id), { subtasks: sanitizeSubtasks(updated) });
       task.subtasks = updated;
       onTaskUpdated?.();
+
+      const doneCount = updated.filter((s) => s.completed).length;
+      const statusVerb = nextCompleted ? "completed" : "reopened";
+      void notifyAdmins(db, {
+        targetRoles: ["super_admin", "ops_admin"],
+        category: "task",
+        eventType: "subtask_toggled",
+        title: `${nextCompleted ? "☑️" : "⬜"} Checklist Updated: ${task.title || "Task"}`,
+        body: `${workerName || "Team Member"} ${statusVerb} "${targetSt?.title || "subtask"}" (${doneCount}/${updated.length} done).`,
+        href: `/admin/tasks?task=${encodeURIComponent(task.id)}`,
+        actorUid: uid,
+        actorName: workerName || "Team Member",
+        taskId: task.id,
+        projectId: task.projectId,
+      });
+
+      const coWorkers = assigneeIds.filter((id) => id !== uid);
+      if (coWorkers.length > 0) {
+        void sendWebPushToWorkers(db, {
+          recipientUids: coWorkers,
+          title: `☑️ Checklist Updated: ${task.title || "Task"}`,
+          body: `${workerName || "Teammate"} ${statusVerb} "${targetSt?.title || "subtask"}" (${doneCount}/${updated.length} done).`,
+          tab: "tasks",
+          taskId: task.id,
+        });
+      }
     } catch {
       toast.error("Failed to update checklist item");
     } finally {
@@ -198,9 +228,10 @@ export default function TaskDetailDrawer({
     if (!newSubtaskTitle.trim() || subtasksBusy) return;
     setSubtasksBusy(true);
     try {
+      const addedTitle = newSubtaskTitle.trim();
       const current = sanitizeSubtasks(task.subtasks);
       const newSubtask = sanitizeSubtask({
-        title: newSubtaskTitle,
+        title: addedTitle,
         description: newSubtaskDesc,
         link: newSubtaskLink,
         completed: false,
@@ -213,6 +244,30 @@ export default function TaskDetailDrawer({
       setNewSubtaskLink("");
       onTaskUpdated?.();
       toast.success("Checklist item added");
+
+      void notifyAdmins(db, {
+        targetRoles: ["super_admin", "ops_admin"],
+        category: "task",
+        eventType: "subtask_added",
+        title: `➕ Subtask Added: ${task.title || "Task"}`,
+        body: `${workerName || "Team Member"} added checklist item "${addedTitle}".`,
+        href: `/admin/tasks?task=${encodeURIComponent(task.id)}`,
+        actorUid: uid,
+        actorName: workerName || "Team Member",
+        taskId: task.id,
+        projectId: task.projectId,
+      });
+
+      const coWorkers = assigneeIds.filter((id) => id !== uid);
+      if (coWorkers.length > 0) {
+        void sendWebPushToWorkers(db, {
+          recipientUids: coWorkers,
+          title: `➕ Subtask Added: ${task.title || "Task"}`,
+          body: `${workerName || "Teammate"} added "${addedTitle}" to the checklist.`,
+          tab: "tasks",
+          taskId: task.id,
+        });
+      }
     } catch {
       toast.error("Failed to add checklist item");
     } finally {
@@ -855,6 +910,7 @@ export default function TaskDetailDrawer({
                 taskTitle={task.title}
                 uid={uid}
                 workerName={workerName}
+                assigneeIds={assigneeIds}
                 onNewAdminMessage={onNewAdminMessage}
               />
             </div>

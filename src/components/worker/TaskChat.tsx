@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Firestore } from "firebase/firestore";
 import { sendTaskMessage, subscribeTaskChat, type ChatMessage } from "@/lib/worker/taskChat";
-import { sendChatNotificationToAdmin, markTaskChatNotificationsRead } from "@/lib/worker/chatNotifications";
+import { sendChatNotification, sendChatNotificationToAdmin, markTaskChatNotificationsRead } from "@/lib/worker/chatNotifications";
 import { playTerminalBeep } from "@/lib/sound";
 
 type Props = {
@@ -12,10 +12,11 @@ type Props = {
   taskTitle?: string;
   uid: string;
   workerName: string;
+  assigneeIds?: string[];
   onNewAdminMessage?: () => void;
 };
 
-export default function TaskChat({ db, taskId, taskTitle, uid, workerName, onNewAdminMessage }: Props) {
+export default function TaskChat({ db, taskId, taskTitle, uid, workerName, assigneeIds, onNewAdminMessage }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -29,7 +30,7 @@ export default function TaskChat({ db, taskId, taskTitle, uid, workerName, onNew
 
       if (!isFirstRender.current && msgs.length > prevCountRef.current) {
         const latest = msgs[msgs.length - 1];
-        if (latest && latest.senderUid !== uid && latest.senderRole === "admin") {
+        if (latest && latest.senderUid !== uid) {
           playTerminalBeep();
           onNewAdminMessage?.();
         }
@@ -68,6 +69,17 @@ export default function TaskChat({ db, taskId, taskTitle, uid, workerName, onNew
         senderName: workerName,
         messageText: textToSend,
       }).catch(() => {});
+      if (assigneeIds && assigneeIds.length > 0) {
+        void sendChatNotification(db, {
+          recipientUids: assigneeIds,
+          taskId,
+          taskTitle: taskTitle || taskId,
+          senderUid: uid,
+          senderName: workerName,
+          senderRole: "worker",
+          messageText: textToSend,
+        }).catch(() => {});
+      }
     } catch (err) {
       console.error(err);
       setInput(textToSend);

@@ -29,6 +29,8 @@ export type WorkSessionState = {
   /** Work time banked from earlier segments today (ms). */
   priorMs: number;
   isActive: boolean;
+  workerId?: string;
+  workerName?: string;
 };
 
 /** Total worked time today, including the running segment. */
@@ -44,11 +46,12 @@ export async function initWorkSession(
 ): Promise<WorkSessionState | null> {
   const now = new Date();
   const today = localYmd(now);
+  const fullName = `${worker.firstName ?? ""} ${worker.lastName ?? ""}`.trim() || worker.email || "Team Member";
 
   const createNew = async (): Promise<WorkSessionState> => {
     const ref = await addDoc(collection(db, "workSessions"), {
       workerId: worker.uid,
-      workerName: `${worker.firstName ?? ""} ${worker.lastName ?? ""}`.trim(),
+      workerName: fullName,
       workerEmail: worker.email ?? "",
       loginTime: now,
       startTime: now,
@@ -66,9 +69,32 @@ export async function initWorkSession(
         lastActiveAt: serverTimestamp(),
         lastActiveCheckAt: serverTimestamp(),
       }).catch(() => {});
+
+      import("./adminNotifications")
+        .then(({ notifyAdmins }) =>
+          notifyAdmins(db, {
+            targetRoles: ["super_admin", "hr_admin"],
+            category: "hr",
+            eventType: "worker_clock_in",
+            title: `🟢 Shift Started: ${fullName}`,
+            body: `${fullName} clocked in for today's shift (${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}).`,
+            href: "/admin/work-sessions",
+            actorUid: worker.uid,
+            actorName: fullName,
+          }),
+        )
+        .catch(() => {});
     }
 
-    return { id: ref.id, startTime: now, segmentStart: now, priorMs: 0, isActive: true };
+    return {
+      id: ref.id,
+      startTime: now,
+      segmentStart: now,
+      priorMs: 0,
+      isActive: true,
+      workerId: worker.uid,
+      workerName: fullName,
+    };
   };
 
   const q = query(
@@ -83,6 +109,7 @@ export async function initWorkSession(
       // Resume today's record: bank what was already logged, start a new segment now.
       const existing = snap.docs[0]!;
       const data = existing.data();
+      const wasActive = Boolean(data.isActive);
       const start: Date = data.startTime?.toDate?.() ?? new Date(data.startTime ?? now);
       const priorMs = typeof data.totalWorkTime === "number" ? data.totalWorkTime : 0;
       await updateDoc(doc(db, "workSessions", existing.id), {
@@ -99,9 +126,34 @@ export async function initWorkSession(
           lastActiveAt: serverTimestamp(),
           lastActiveCheckAt: serverTimestamp(),
         }).catch(() => {});
+
+        if (!wasActive) {
+          import("./adminNotifications")
+            .then(({ notifyAdmins }) =>
+              notifyAdmins(db, {
+                targetRoles: ["super_admin", "hr_admin"],
+                category: "hr",
+                eventType: "worker_shift_resumed",
+                title: `▶️ Shift Resumed: ${fullName}`,
+                body: `${fullName} resumed their shift today (${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}).`,
+                href: "/admin/work-sessions",
+                actorUid: worker.uid,
+                actorName: fullName,
+              }),
+            )
+            .catch(() => {});
+        }
       }
 
-      return { id: existing.id, startTime: start, segmentStart: now, priorMs, isActive: true };
+      return {
+        id: existing.id,
+        startTime: start,
+        segmentStart: now,
+        priorMs,
+        isActive: true,
+        workerId: worker.uid,
+        workerName: fullName,
+      };
     }
     return await createNew();
   } catch (e: unknown) {
@@ -132,6 +184,22 @@ export async function endWorkSession(db: Firestore, session: WorkSessionState): 
     totalWorkTime,
     completedAt: serverTimestamp(),
   });
+  const hoursLogged = (totalWorkTime / (1000 * 60 * 60)).toFixed(1);
+  const wName = session.workerName || "Team Member";
+  import("./adminNotifications")
+    .then(({ notifyAdmins }) =>
+      notifyAdmins(db, {
+        targetRoles: ["super_admin", "hr_admin"],
+        category: "hr",
+        eventType: "worker_clock_out",
+        title: `⏹️ Shift Ended: ${wName}`,
+        body: `${wName} clocked out (${hoursLogged}h logged today).`,
+        href: "/admin/work-sessions",
+        actorUid: session.workerId,
+        actorName: wName,
+      }),
+    )
+    .catch(() => {});
   return { ...session, priorMs: totalWorkTime, segmentStart: logoutTime, isActive: false };
 }
 
@@ -178,6 +246,23 @@ export async function confirmPresenceCheckIn(
       currentTaskTitle: data.taskTitle || "Active & Available",
       currentTaskNote: data.note || null,
     }).catch(() => {});
+
+    const wName = data.workerName || "Team Member";
+    import("./adminNotifications")
+      .then(({ notifyAdmins }) =>
+        notifyAdmins(db, {
+          targetRoles: ["super_admin", "hr_admin", "ops_admin"],
+          category: "hr",
+          eventType: "worker_presence_checkin",
+          title: `✅ Active Check-In: ${wName}`,
+          body: `${wName} confirmed active presence — working on "${data.taskTitle || "Active & Available"}"${data.note ? ` (${data.note})` : ""}.`,
+          href: "/admin/work-sessions",
+          actorUid: workerId,
+          actorName: wName,
+          taskId: data.taskId,
+        }),
+      )
+      .catch(() => {});
   }
 }
 

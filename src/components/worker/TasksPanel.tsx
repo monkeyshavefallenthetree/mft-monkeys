@@ -27,6 +27,7 @@ import RichDescriptionEditor from "./RichDescriptionEditor";
 import { toast, confirmDialog } from "@/lib/worker/feedback";
 import { localYmd } from "@/lib/worker/format";
 import { notifyAdmins } from "@/lib/worker/adminNotifications";
+import { sendWebPushToWorkers } from "@/lib/worker/webPush";
 
 type Props = {
   db: Firestore;
@@ -510,6 +511,24 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
         taskId: id,
         projectId: targetTask?.projectId,
       });
+      if (targetTask) {
+        const coWorkers = Array.from(
+          new Set([
+            ...assignedWorkerIds(targetTask.assignedTo),
+            ...(Array.isArray(targetTask.assignedWorkerIds) ? targetTask.assignedWorkerIds : []),
+            ...(targetTask.workerId ? [String(targetTask.workerId)] : []),
+          ]),
+        ).filter((wId) => wId && wId !== uid);
+        if (coWorkers.length > 0) {
+          void sendWebPushToWorkers(db, {
+            recipientUids: coWorkers,
+            title: `▶️ Task Started: ${targetTask.title || "Directive"}`,
+            body: `${workerName || "Teammate"} started working on "${targetTask.title || id}".`,
+            tab: "tasks",
+            taskId: id,
+          });
+        }
+      }
       toast.success("Task started", { description: "Timer and activity are logged." });
       await refresh();
     } catch {
@@ -539,6 +558,24 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
         taskId: id,
         projectId: targetTask?.projectId,
       });
+      if (targetTask) {
+        const coWorkers = Array.from(
+          new Set([
+            ...assignedWorkerIds(targetTask.assignedTo),
+            ...(Array.isArray(targetTask.assignedWorkerIds) ? targetTask.assignedWorkerIds : []),
+            ...(targetTask.workerId ? [String(targetTask.workerId)] : []),
+          ]),
+        ).filter((wId) => wId && wId !== uid);
+        if (coWorkers.length > 0) {
+          void sendWebPushToWorkers(db, {
+            recipientUids: coWorkers,
+            title: `✅ Task Submitted for Review: ${targetTask.title || "Directive"}`,
+            body: `${workerName || "Teammate"} submitted "${targetTask.title || id}" for admin approval.`,
+            tab: "tasks",
+            taskId: id,
+          });
+        }
+      }
       toast.success("Submitted for approval", {
         description: "Admin & Account Manager have been notified. You can undo if you need to edit further.",
         action: {
