@@ -8,6 +8,7 @@ import {
   isStandalonePwa,
   isWebPushSupported,
   sendWebPushToWorkers,
+  showBackgroundNotification,
   subscribeWorkerWebPush,
   syncWorkerWebPushIfGranted,
 } from "@/lib/worker/webPush";
@@ -79,6 +80,11 @@ export default function PwaPushBanner({ db, uid, workerName }: Props) {
       setPermission(getNotificationPermission());
       if (res.ok) {
         setSubscribed(true);
+        void showBackgroundNotification({
+          title: "MFT Notifications Enabled 🔔",
+          body: "تم تفعيل إشعارات شاشة القفل والخلفية بنجاح!",
+          tab: "tasks",
+        });
         toast.success("Background notifications enabled 🔔", {
           description: "تم تفعيل الإشعارات في الخلفية بنجاح — ستصلك التنبيهات حتى والتطبيق مغلق.",
           duration: 6000,
@@ -123,14 +129,18 @@ export default function PwaPushBanner({ db, uid, workerName }: Props) {
     if (!db || !uid) return;
     setTesting(true);
     try {
+      await subscribeWorkerWebPush(db, uid);
+      toast.info("🔒 Lock your phone screen now! · اقفل شاشة الهاتف الآن!", {
+        description: "سيصلك إشعار على شاشة القفل خلال 4 ثوانٍ... (Sending push in 4 seconds so you can lock your screen)",
+        duration: 5000,
+      });
       await sendWebPushToWorkers(db, {
         recipientUids: [uid],
-        title: "MFT Background Push Active 🔔",
-        body: `مرحبًا ${workerName || ""}! الإشعارات في الخلفية تعمل بنجاح على هاتفك.`,
+        title: "MFT Lock Screen Alert 🔔",
+        body: `مرحبًا ${workerName || ""}! إشعارات شاشة القفل تعمل بنجاح على هاتفك.`,
         tab: "tasks",
-      });
-      toast.success("Test notification sent!", {
-        description: "Lock your screen or switch apps — your device receives push alerts in the background.",
+        urgent: true,
+        delayMs: 4000,
       });
     } catch {
       toast.error("Could not send test push");
@@ -154,13 +164,13 @@ export default function PwaPushBanner({ db, uid, workerName }: Props) {
   const needsPushEnable = pushSupported && (permission !== "granted" || !subscribed);
   const canInstallChrome = Boolean(installPrompt) && !standalone;
 
-  // When already subscribed & no install prompt needed, show a compact status bar in Profile or nothing intrusive
+  // When already subscribed & no install prompt needed, show a compact status bar with lock-screen test
   if (!needsIosInstall && !needsPushEnable && !canInstallChrome) {
     return (
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3.5 py-2 text-xs">
         <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-300">
           <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
-          <span className="font-semibold">Background Push Active · الإشعارات في الخلفية مفعّلة</span>
+          <span className="font-semibold">Background &amp; Lock Screen Push Active · إشعارات شاشة القفل مفعّلة</span>
         </div>
         <button
           type="button"
@@ -168,7 +178,7 @@ export default function PwaPushBanner({ db, uid, workerName }: Props) {
           disabled={testing}
           className="rounded-lg border border-emerald-500/40 bg-white/80 dark:bg-zinc-900/80 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-zinc-800 cursor-pointer disabled:opacity-50"
         >
-          {testing ? "Sending…" : "🔔 Test Notification · تجربة إشعار"}
+          {testing ? "🔒 Lock screen now (4s)…" : "🔔 Test Lock Screen (4s) · تجربة شاشة القفل"}
         </button>
       </div>
     );

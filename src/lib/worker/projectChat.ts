@@ -33,22 +33,60 @@ export function subscribeProjectChat(
   callback: (msgs: ProjectChatMessage[]) => void,
   onError?: (err: Error) => void,
 ): Unsubscribe {
-  const q = query(
+  // Store & subscribe at tasks/project_{projectId}/messages so it is authorized
+  // under both `tasks/{id}/messages` and `projects/{id}/messages` rules.
+  const qTask = query(
+    collection(db, "tasks", `project_${projectId}`, "messages"),
+    orderBy("createdAt", "asc"),
+  );
+  const qProj = query(
     collection(db, "projects", projectId, "messages"),
     orderBy("createdAt", "asc"),
   );
-  return onSnapshot(
-    q,
+
+  let taskMsgs: ProjectChatMessage[] = [];
+  let projMsgs: ProjectChatMessage[] = [];
+
+  const emitMerged = () => {
+    const map = new Map<string, ProjectChatMessage>();
+    for (const m of [...projMsgs, ...taskMsgs]) {
+      const key = `${m.senderUid}_${m.text}_${m.createdAt?.toDate?.()?.getTime() ?? m.id}`;
+      if (!map.has(key)) map.set(key, m);
+    }
+    const merged = Array.from(map.values()).sort((a, b) => {
+      const ta = a.createdAt?.toDate?.()?.getTime() ?? 0;
+      const tb = b.createdAt?.toDate?.()?.getTime() ?? 0;
+      return ta - tb;
+    });
+    callback(merged);
+  };
+
+  const unsub1 = onSnapshot(
+    qTask,
     (snap) => {
-      callback(
-        snap.docs.map((d) => ({ id: d.id, ...d.data() }) as ProjectChatMessage),
-      );
+      taskMsgs = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as ProjectChatMessage);
+      emitMerged();
     },
     (err) => {
-      console.warn("[ProjectChat] Firestore listener error:", err.message);
       onError?.(err);
     },
   );
+
+  const unsub2 = onSnapshot(
+    qProj,
+    (snap) => {
+      projMsgs = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as ProjectChatMessage);
+      emitMerged();
+    },
+    () => {
+      /* ignore if projects/{id}/messages rule is not deployed yet */
+    },
+  );
+
+  return () => {
+    unsub1();
+    unsub2();
+  };
 }
 
 export async function sendProjectMessage(
@@ -66,7 +104,7 @@ export async function sendProjectMessage(
   const trimmed = params.text.trim();
   if (!trimmed) return;
 
-  await addDoc(collection(db, "projects", params.projectId, "messages"), {
+  const msgData = {
     text: trimmed,
     senderUid: params.senderUid,
     senderName: params.senderName,
@@ -74,7 +112,10 @@ export async function sendProjectMessage(
     senderTitle: params.senderTitle || "Team Member",
     isSystem: false,
     createdAt: serverTimestamp(),
-  });
+  };
+
+  await addDoc(collection(db, "tasks", `project_${params.projectId}`, "messages"), msgData);
+  await addDoc(collection(db, "projects", params.projectId, "messages"), msgData).catch(() => {});
 
   const preview = trimmed.length > 80 ? `${trimmed.slice(0, 80)}…` : trimmed;
 

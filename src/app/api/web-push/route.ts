@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import webpush from "web-push";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 const VAPID_PUBLIC_KEY =
   process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ||
   "BC4qV_AA_NGWwJUuOf3I5pKrblvWSHOhhSdY-F0ENgdfzZ3tqFEGPG6HcIj0tv-i8yGkeJA5puekWty8rLH5KQM";
@@ -53,6 +56,7 @@ export async function POST(req: NextRequest) {
     const body = (await req.json()) as {
       subscriptions?: StoredPushSubscription[];
       payload?: WebPushPayload;
+      delayMs?: number;
     };
 
     const subs = Array.isArray(body.subscriptions) ? body.subscriptions : [];
@@ -65,17 +69,23 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ sent: 0, failed: 0, goneEndpoints: [] });
     }
 
+    const delayMs = typeof body.delayMs === "number" ? Math.min(Math.max(0, body.delayMs), 8000) : 0;
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
     const validSubs = subs.filter(
       (s) => s && typeof s.endpoint === "string" && s.keys?.p256dh && s.keys?.auth,
     );
 
+    const baseTag = payload.tag || payload.taskId || "mft";
     const serialized = JSON.stringify({
       title: payload.title,
       body: payload.body || "",
       url: payload.url || "/dashboard",
       tab: payload.tab,
       taskId: payload.taskId,
-      tag: payload.tag || payload.taskId || `mft-${Date.now()}`,
+      tag: `${baseTag}-${Date.now()}`,
       urgent: Boolean(payload.urgent || payload.requireInteraction),
       requireInteraction: Boolean(payload.requireInteraction || payload.urgent),
       badgeCount: payload.badgeCount ?? 1,

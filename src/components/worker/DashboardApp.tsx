@@ -1027,14 +1027,12 @@ export default function DashboardApp() {
                 description: fresh.length > 1 ? `+${fresh.length - 1} more` : fresh[0].message?.slice(0, 120),
                 action: { label: "View", onClick: () => setTab("alerts") },
               });
-              if (document.hidden) {
-                void showBackgroundNotification({
-                  title: fresh[0].title || "New HR notice",
-                  body: fresh[0].message?.slice(0, 140) || "You have a new notice from HR.",
-                  tab: "alerts",
-                  urgent: fresh[0].priority === "high" || fresh[0].type === "urgent" || fresh[0].type === "penalty",
-                });
-              }
+              void showBackgroundNotification({
+                title: fresh[0].title || "New HR notice",
+                body: fresh[0].message?.slice(0, 140) || "You have a new notice from HR.",
+                tab: "alerts",
+                urgent: fresh[0].priority === "high" || fresh[0].type === "urgent" || fresh[0].type === "penalty",
+              });
             }
           }
           known = new Set(rows.map((r) => r.id));
@@ -1075,13 +1073,11 @@ export default function DashboardApp() {
                   description: desc,
                   action: { label: "View", onClick: () => setTab("exceptions") },
                 });
-                if (document.hidden) {
-                  void showBackgroundNotification({
-                    title: `${exceptionLabel(r)} ${now}`,
-                    body: desc,
-                    tab: "exceptions",
-                  });
-                }
+                void showBackgroundNotification({
+                  title: `${exceptionLabel(r)} ${now}`,
+                  body: desc,
+                  tab: "exceptions",
+                });
               }
             });
           }
@@ -1130,9 +1126,7 @@ export default function DashboardApp() {
               description: desc,
               action: { label: "View", onClick: () => setTab("profile") },
             });
-            if (document.hidden) {
-              void showBackgroundNotification({ title: label, body: desc, tab: "profile" });
-            }
+            void showBackgroundNotification({ title: label, body: desc, tab: "profile" });
           }
         }
         known = new Set(rows.map((r) => r.id));
@@ -1170,40 +1164,34 @@ export default function DashboardApp() {
                     description: `"${titleText}" was pre-approved! Upload the invoice when ready.`,
                     action: { label: "Open", onClick: () => setTab("expenses") },
                   });
-                  if (document.hidden) {
-                    void showBackgroundNotification({
-                      title: "Purchase Pre-Approved ✓",
-                      body: `"${titleText}" was pre-approved! Upload the invoice when ready.`,
-                      tab: "expenses",
-                    });
-                  }
+                  void showBackgroundNotification({
+                    title: "Purchase Pre-Approved ✓",
+                    body: `"${titleText}" was pre-approved! Upload the invoice when ready.`,
+                    tab: "expenses",
+                  });
                 } else if (stg === "approved") {
                   playTerminalBeep();
                   toast.success("Reimbursement Approved 🎉", {
                     description: `"${titleText}" has been approved by HR.`,
                     action: { label: "Open", onClick: () => setTab("expenses") },
                   });
-                  if (document.hidden) {
-                    void showBackgroundNotification({
-                      title: "Reimbursement Approved 🎉",
-                      body: `"${titleText}" has been approved by HR.`,
-                      tab: "expenses",
-                    });
-                  }
+                  void showBackgroundNotification({
+                    title: "Reimbursement Approved 🎉",
+                    body: `"${titleText}" has been approved by HR.`,
+                    tab: "expenses",
+                  });
                 } else if (stg === "rejected") {
                   playTerminalBeep({ urgent: true });
                   toast.error("Reimbursement Rejected", {
                     description: `"${titleText}": ${String(data.rejectionReason || "See details in Expenses tab.")}`,
                     action: { label: "Open", onClick: () => setTab("expenses") },
                   });
-                  if (document.hidden) {
-                    void showBackgroundNotification({
-                      title: "Reimbursement Rejected",
-                      body: `"${titleText}": ${String(data.rejectionReason || "See details in Expenses tab.")}`,
-                      tab: "expenses",
-                      urgent: true,
-                    });
-                  }
+                  void showBackgroundNotification({
+                    title: "Reimbursement Rejected",
+                    body: `"${titleText}": ${String(data.rejectionReason || "See details in Expenses tab.")}`,
+                    tab: "expenses",
+                    urgent: true,
+                  });
                 }
               }
             }
@@ -1312,17 +1300,13 @@ export default function DashboardApp() {
             description: desc,
             action: open,
           });
-          if (document.hidden) {
-            void showBackgroundNotification({ title, body: desc, tab: "tasks" });
-          }
+          void showBackgroundNotification({ title, body: desc, tab: "tasks" });
         }
         approved.forEach((d) => {
           playTerminalBeep();
           const desc = String(d.data().title ?? "");
           toast.success("Task approved 🎉", { description: desc, action: open });
-          if (document.hidden) {
-            void showBackgroundNotification({ title: "Task approved 🎉", body: desc, tab: "tasks" });
-          }
+          void showBackgroundNotification({ title: "Task approved 🎉", body: desc, tab: "tasks" });
         });
         sentBack.forEach((d) => {
           playTerminalBeep({ urgent: true });
@@ -1332,9 +1316,7 @@ export default function DashboardApp() {
             action: open,
             duration: 8000,
           });
-          if (document.hidden) {
-            void showBackgroundNotification({ title: "Changes requested", body: desc, tab: "tasks", urgent: true });
-          }
+          void showBackgroundNotification({ title: "Changes requested", body: desc, tab: "tasks", urgent: true });
         });
       }
 
@@ -1377,14 +1359,12 @@ export default function DashboardApp() {
                 description: `${n.taskTitle}: ${n.messagePreview}`,
                 action: { label: "View", onClick: () => setTab("tasks") },
               });
-              if (document.hidden) {
-                void showBackgroundNotification({
-                  title: `Message from ${n.senderName}`,
-                  body: `${n.taskTitle}: ${n.messagePreview}`,
-                  tab: "tasks",
-                  taskId: n.taskId,
-                });
-              }
+              void showBackgroundNotification({
+                title: `Message from ${n.senderName}`,
+                body: `${n.taskTitle}: ${n.messagePreview}`,
+                tab: "tasks",
+                taskId: n.taskId,
+              });
             }
           }
         }

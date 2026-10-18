@@ -1,4 +1,4 @@
-/* MFT Monkeys Worker Portal — Service Worker (Web Push + Background Notifications) */
+/* MFT Monkeys Worker Portal — Service Worker (Web Push + Mobile Lock Screen Notifications) */
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
@@ -11,7 +11,10 @@ self.addEventListener("activate", (event) => {
 function buildNotificationOptions(payload) {
   const title = payload.title || "MFT Monkeys";
   const url = payload.url || "/dashboard";
-  const tag = payload.tag || payload.taskId || `mft-${Date.now()}`;
+  // Always use a unique tag per push event so iOS & Android wake the lock screen
+  // instead of silently updating an older notification in the tray.
+  const baseTag = payload.tag || payload.taskId || "mft";
+  const tag = `${baseTag}-${Date.now()}`;
   const urgent = Boolean(payload.urgent || payload.requireInteraction);
 
   return {
@@ -22,8 +25,10 @@ function buildNotificationOptions(payload) {
       badge: payload.badge || "/icons/icon-192.png",
       tag,
       renotify: true,
+      silent: false,
       requireInteraction: urgent,
       vibrate: urgent ? [300, 120, 300, 120, 400] : [200, 100, 200],
+      timestamp: Date.now(),
       data: {
         url,
         tab: payload.tab || null,
@@ -32,6 +37,28 @@ function buildNotificationOptions(payload) {
       },
     },
   };
+}
+
+async function displayLockScreenNotification(payload) {
+  const { title, options } = buildNotificationOptions(payload);
+  try {
+    await self.registration.showNotification(title, options);
+  } catch {
+    // Fallback with minimal standard options for strict mobile browsers (e.g. iOS WebKit)
+    await self.registration.showNotification(title, {
+      body: options.body,
+      icon: "/icons/icon-192.png",
+      data: options.data,
+    });
+  }
+
+  try {
+    if (self.navigator && typeof self.navigator.setAppBadge === "function") {
+      await self.navigator.setAppBadge(payload.badgeCount || 1);
+    }
+  } catch {
+    /* ignore badge errors */
+  }
 }
 
 self.addEventListener("push", (event) => {
@@ -44,20 +71,7 @@ self.addEventListener("push", (event) => {
     }
   }
 
-  const { title, options } = buildNotificationOptions(payload);
-
-  event.waitUntil(
-    (async () => {
-      try {
-        if (self.navigator && typeof self.navigator.setAppBadge === "function") {
-          await self.navigator.setAppBadge(payload.badgeCount || 1);
-        }
-      } catch {
-        /* ignore badge errors */
-      }
-      await self.registration.showNotification(title, options);
-    })(),
-  );
+  event.waitUntil(displayLockScreenNotification(payload));
 });
 
 self.addEventListener("message", (event) => {
@@ -65,8 +79,7 @@ self.addEventListener("message", (event) => {
   if (!msg || typeof msg !== "object") return;
 
   if (msg.type === "SHOW_LOCAL_NOTIFICATION" && msg.payload) {
-    const { title, options } = buildNotificationOptions(msg.payload);
-    event.waitUntil(self.registration.showNotification(title, options));
+    event.waitUntil(displayLockScreenNotification(msg.payload));
   } else if (msg.type === "CLEAR_BADGE") {
     if (self.navigator && typeof self.navigator.clearAppBadge === "function") {
       self.navigator.clearAppBadge().catch(() => {});

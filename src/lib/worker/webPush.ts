@@ -1,10 +1,22 @@
 "use client";
 
-import { collection, doc, getDoc, getDocs, serverTimestamp, updateDoc, type Firestore } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  serverTimestamp,
+  updateDoc,
+  where,
+  type Firestore,
+} from "firebase/firestore";
 
 export const DEFAULT_VAPID_PUBLIC_KEY =
   process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ||
   "BC4qV_AA_NGWwJUuOf3I5pKrblvWSHOhhSdY-F0ENgdfzZ3tqFEGPG6HcIj0tv-i8yGkeJA5puekWty8rLH5KQM";
+
+const LOCAL_SUB_KEY = "mft.webPush.sub";
 
 export type StoredPushSubscription = {
   endpoint: string;
@@ -27,6 +39,35 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
     outputArray[i] = rawData.charCodeAt(i);
   }
   return outputArray;
+}
+
+export function extractWebPushSubscriptions(data: Record<string, unknown> | undefined): StoredPushSubscription[] {
+  if (!data) return [];
+  const map = new Map<string, StoredPushSubscription>();
+
+  if (Array.isArray(data.webPushSubscriptions)) {
+    for (const s of data.webPushSubscriptions) {
+      if (s && typeof s.endpoint === "string" && s.keys?.p256dh && s.keys?.auth) {
+        map.set(s.endpoint, s as StoredPushSubscription);
+      }
+    }
+  }
+
+  if (typeof data.expoPushToken === "string" && data.expoPushToken.startsWith("webp:")) {
+    try {
+      const parsed = JSON.parse(data.expoPushToken.slice(5));
+      const arr = Array.isArray(parsed) ? parsed : [parsed];
+      for (const s of arr) {
+        if (s && typeof s.endpoint === "string" && s.keys?.p256dh && s.keys?.auth) {
+          map.set(s.endpoint, s as StoredPushSubscription);
+        }
+      }
+    } catch {
+      /* ignore invalid JSON */
+    }
+  }
+
+  return Array.from(map.values());
 }
 
 export function isStandalonePwa(): boolean {
@@ -70,6 +111,7 @@ export async function registerWorkerServiceWorker(): Promise<ServiceWorkerRegist
   if (typeof window === "undefined" || !("serviceWorker" in navigator)) return null;
   try {
     const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    void reg.update().catch(() => {});
     await navigator.serviceWorker.ready;
     return reg;
   } catch (err) {
@@ -98,21 +140,35 @@ async function saveSubscriptionToWorkerDoc(
   };
 
   try {
+    localStorage.setItem(LOCAL_SUB_KEY, JSON.stringify(entry));
+  } catch {
+    /* ignore */
+  }
+
+  try {
     const ref = doc(db, "workers", uid);
     const snap = await getDoc(ref);
-    const existingRaw = snap.exists() ? snap.data()?.webPushSubscriptions : [];
-    const existing: StoredPushSubscription[] = Array.isArray(existingRaw) ? existingRaw : [];
+    const existing = snap.exists()
+      ? extractWebPushSubscriptions(snap.data() as Record<string, unknown>)
+      : [];
 
-    // Replace matching endpoint and keep up to 5 most recent device subscriptions
+    // Replace matching endpoint and keep up to 4 most recent device subscriptions
     const filtered = existing.filter(
       (item) => item && typeof item.endpoint === "string" && item.endpoint !== entry.endpoint,
     );
-    const next = [entry, ...filtered].slice(0, 5);
+    const next = [entry, ...filtered].slice(0, 4);
 
+    // 1. Always write to `expoPushToken` with `webp:` prefix because `expoPushToken` is allowed
+    // by `changedOnly` in all versions of Firestore security rules.
+    await updateDoc(ref, {
+      expoPushToken: `webp:${JSON.stringify(next)}`,
+    });
+
+    // 2. Also write to `webPushSubscriptions` when the updated Firestore rules are deployed.
     await updateDoc(ref, {
       webPushSubscriptions: next,
       webPushUpdatedAt: serverTimestamp(),
-    });
+    }).catch(() => {});
   } catch (err) {
     console.warn("[WebPush] Could not save subscription to Firestore:", err);
   }
@@ -122,7 +178,7 @@ async function saveSubscriptionToWorkerDoc(
 
 /**
  * Interactive subscription flow: requests permission, subscribes to PushManager,
- * and saves the subscription to `workers/{uid}.webPushSubscriptions`.
+ * and saves the subscription to `workers/{uid}`.
  */
 export async function subscribeWorkerWebPush(
   db: Firestore,
@@ -150,9 +206,9 @@ export async function subscribeWorkerWebPush(
   }
 
   try {
+    const appServerKey = urlBase64ToUint8Array(DEFAULT_VAPID_PUBLIC_KEY);
     let sub = await reg.pushManager.getSubscription();
     if (!sub) {
-      const appServerKey = urlBase64ToUint8Array(DEFAULT_VAPID_PUBLIC_KEY);
       sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: appServerKey.buffer as ArrayBuffer,
@@ -183,8 +239,8 @@ export async function syncWorkerWebPushIfGranted(
 }
 
 /**
- * Fires a native OS notification through the Service Worker when the app is in
- * the background on mobile/desktop.
+ * Fires a native OS notification through the Service Worker so it appears in the
+ * mobile notification shade and lock screen.
  */
 export async function showBackgroundNotification(payload: {
   title: string;
@@ -198,22 +254,35 @@ export async function showBackgroundNotification(payload: {
   if (typeof window === "undefined" || !("Notification" in window)) return;
   if (Notification.permission !== "granted") return;
 
+  const uniqueTag = `${payload.tag || payload.taskId || "mft"}-${Date.now()}`;
+
   try {
     const reg = await navigator.serviceWorker?.getRegistration("/");
+    if (reg && typeof reg.showNotification === "function") {
+      try {
+        await reg.showNotification(payload.title, {
+          body: payload.body,
+          icon: "/icons/icon-192.png",
+          badge: "/icons/icon-192.png",
+          tag: uniqueTag,
+          silent: false,
+          requireInteraction: Boolean(payload.urgent),
+          data: { url: payload.url || "/dashboard", tab: payload.tab, taskId: payload.taskId },
+        });
+        return;
+      } catch {
+        await reg.showNotification(payload.title, {
+          body: payload.body,
+          icon: "/icons/icon-192.png",
+          data: { url: payload.url || "/dashboard", tab: payload.tab, taskId: payload.taskId },
+        });
+        return;
+      }
+    }
     if (reg && reg.active) {
       reg.active.postMessage({
         type: "SHOW_LOCAL_NOTIFICATION",
-        payload,
-      });
-      return;
-    }
-    if (reg && typeof reg.showNotification === "function") {
-      await reg.showNotification(payload.title, {
-        body: payload.body,
-        icon: "/icons/icon-192.png",
-        badge: "/icons/icon-192.png",
-        tag: payload.tag || payload.taskId || `mft-${Date.now()}`,
-        data: { url: payload.url || "/dashboard", tab: payload.tab, taskId: payload.taskId },
+        payload: { ...payload, tag: uniqueTag },
       });
       return;
     }
@@ -225,7 +294,7 @@ export async function showBackgroundNotification(payload: {
     new Notification(payload.title, {
       body: payload.body,
       icon: "/icons/icon-192.png",
-      tag: payload.tag || payload.taskId,
+      tag: uniqueTag,
     });
   } catch {
     /* mobile browsers require ServiceWorkerRegistration.showNotification */
@@ -245,19 +314,32 @@ export async function sendWebPushToWorkers(
     taskId?: string;
     url?: string;
     urgent?: boolean;
+    delayMs?: number;
   },
-): Promise<void> {
-  const allSubs: StoredPushSubscription[] = [];
+): Promise<{ sent: number }> {
+  const subMap = new Map<string, StoredPushSubscription>();
+
   for (const uid of opts.recipientUids) {
     try {
       const snap = await getDoc(doc(db, "workers", uid));
       if (!snap.exists()) continue;
-      const subs = snap.data()?.webPushSubscriptions;
-      if (Array.isArray(subs)) {
-        for (const s of subs) {
-          if (s && typeof s.endpoint === "string" && s.keys?.p256dh && s.keys?.auth) {
-            allSubs.push(s as StoredPushSubscription);
-          }
+      const extracted = extractWebPushSubscriptions(snap.data() as Record<string, unknown>);
+      for (const s of extracted) {
+        subMap.set(s.endpoint, s);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // Fallback to local device subscription if testing on the current device
+  if (subMap.size === 0 && typeof window !== "undefined") {
+    try {
+      const raw = localStorage.getItem(LOCAL_SUB_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as StoredPushSubscription;
+        if (parsed?.endpoint && parsed?.keys?.p256dh && parsed?.keys?.auth) {
+          subMap.set(parsed.endpoint, parsed);
         }
       }
     } catch {
@@ -265,14 +347,16 @@ export async function sendWebPushToWorkers(
     }
   }
 
-  if (allSubs.length === 0) return;
+  const allSubs = Array.from(subMap.values());
+  if (allSubs.length === 0) return { sent: 0 };
 
   try {
-    await fetch("/api/web-push", {
+    const res = await fetch("/api/web-push", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         subscriptions: allSubs,
+        delayMs: opts.delayMs,
         payload: {
           title: opts.title,
           body: opts.body,
@@ -283,9 +367,14 @@ export async function sendWebPushToWorkers(
         },
       }),
     });
+    if (res.ok) {
+      const data = (await res.json()) as { sent?: number };
+      return { sent: data.sent ?? 0 };
+    }
   } catch (err) {
     console.warn("[WebPush] sendWebPushToWorkers failed:", err);
   }
+  return { sent: 0 };
 }
 
 /**
@@ -303,33 +392,47 @@ export async function sendWebPushToAdmins(
     urgent?: boolean;
   },
 ): Promise<void> {
-  const allSubs: StoredPushSubscription[] = [];
+  const subMap = new Map<string, StoredPushSubscription>();
+
+  const collectFromDoc = (data: Record<string, unknown> | undefined) => {
+    if (!data) return;
+    const role = data.role as "super_admin" | "ops_admin" | "hr_admin" | undefined;
+    if (role && !opts.roles.includes(role)) return;
+
+    if (Array.isArray(data.subscriptions)) {
+      for (const s of data.subscriptions) {
+        if (s && typeof s.endpoint === "string" && s.keys?.p256dh && s.keys?.auth) {
+          subMap.set(s.endpoint, s as StoredPushSubscription);
+        }
+      }
+    } else if (
+      data.subscription &&
+      typeof (data.subscription as StoredPushSubscription).endpoint === "string" &&
+      (data.subscription as StoredPushSubscription).keys?.p256dh &&
+      (data.subscription as StoredPushSubscription).keys?.auth
+    ) {
+      const s = data.subscription as StoredPushSubscription;
+      subMap.set(s.endpoint, s);
+    }
+  };
+
   try {
     const snap = await getDocs(collection(db, "adminPushSubscriptions"));
-    snap.forEach((d) => {
-      const data = d.data();
-      const role = data?.role as "super_admin" | "ops_admin" | "hr_admin" | undefined;
-      if (role && !opts.roles.includes(role)) return;
+    snap.forEach((d) => collectFromDoc(d.data() as Record<string, unknown>));
+  } catch {
+    /* fallback below when adminPushSubscriptions is not in deployed Firestore rules */
+  }
 
-      if (Array.isArray(data?.subscriptions)) {
-        for (const s of data.subscriptions) {
-          if (s && typeof s.endpoint === "string" && s.keys?.p256dh && s.keys?.auth) {
-            allSubs.push(s as StoredPushSubscription);
-          }
-        }
-      } else if (
-        data?.subscription &&
-        typeof data.subscription.endpoint === "string" &&
-        data.subscription.keys?.p256dh &&
-        data.subscription.keys?.auth
-      ) {
-        allSubs.push(data.subscription as StoredPushSubscription);
-      }
-    });
+  try {
+    const fallbackSnap = await getDocs(
+      query(collection(db, "alerts"), where("type", "==", "admin_push_sub")),
+    );
+    fallbackSnap.forEach((d) => collectFromDoc(d.data() as Record<string, unknown>));
   } catch {
     /* ignore */
   }
 
+  const allSubs = Array.from(subMap.values());
   if (allSubs.length === 0) return;
 
   try {
