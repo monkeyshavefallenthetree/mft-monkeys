@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import webpush from "web-push";
 
-export const VAPID_PUBLIC_KEY =
+const VAPID_PUBLIC_KEY =
   process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ||
   "BC4qV_AA_NGWwJUuOf3I5pKrblvWSHOhhSdY-F0ENgdfzZ3tqFEGPG6HcIj0tv-i8yGkeJA5puekWty8rLH5KQM";
 
@@ -18,7 +18,7 @@ function ensureVapid() {
   configured = true;
 }
 
-export type StoredPushSubscription = {
+type StoredPushSubscription = {
   endpoint: string;
   expirationTime?: number | null;
   keys: {
@@ -30,7 +30,7 @@ export type StoredPushSubscription = {
   createdAt?: string;
 };
 
-export type WebPushPayload = {
+type WebPushPayload = {
   title: string;
   body: string;
   url?: string;
