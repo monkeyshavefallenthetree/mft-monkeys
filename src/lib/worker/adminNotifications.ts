@@ -1,9 +1,9 @@
 import { addDoc, collection, serverTimestamp, type Firestore } from "firebase/firestore";
 import { sendWebPushToAdmins } from "./webPush";
 
-export type AdminTargetRole = "super_admin" | "ops_admin" | "hr_admin";
+export type AdminTargetRole = "super_admin" | "ops_admin" | "account_manager" | "hr_admin";
 
-export type AdminNotificationCategory = "chat" | "project" | "task" | "client" | "hr";
+export type AdminNotificationCategory = "chat" | "project" | "task" | "tasks" | "client" | "hr";
 
 export interface NotifyAdminsInput {
   targetRoles: AdminTargetRole[];

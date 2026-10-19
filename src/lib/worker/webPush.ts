@@ -384,7 +384,7 @@ export async function sendWebPushToWorkers(
 export async function sendWebPushToAdmins(
   db: Firestore,
   opts: {
-    roles: Array<"super_admin" | "ops_admin" | "hr_admin">;
+    roles: Array<"super_admin" | "ops_admin" | "account_manager" | "hr_admin">;
     title: string;
     body: string;
     url?: string;
@@ -396,7 +396,7 @@ export async function sendWebPushToAdmins(
 
   const collectFromDoc = (data: Record<string, unknown> | undefined) => {
     if (!data) return;
-    const role = data.role as "super_admin" | "ops_admin" | "hr_admin" | undefined;
+    const role = data.role as "super_admin" | "ops_admin" | "account_manager" | "hr_admin" | undefined;
     if (role && !opts.roles.includes(role)) return;
 
     if (Array.isArray(data.subscriptions)) {

@@ -4,9 +4,14 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, getDoc, updateDoc, onSnapshot, query, collection, where } from "firebase/firestore";
+import { doc, getDoc, updateDoc, onSnapshot, query, collection, where, serverTimestamp } from "firebase/firestore";
 import type { Timestamp } from "firebase/firestore";
-import { playTerminalBeep, isSoundEnabled, setSoundEnabled } from "@/lib/sound";
+import {
+  playTerminalBeep,
+  isSoundEnabled,
+  setSoundEnabled,
+  stopContinuousCheckInAlarm,
+} from "@/lib/sound";
 import { getFirebase, isFirebaseConfigured } from "@/lib/firebase";
 import { markAlertRead, markAlertsRead, subscribeAlertsForWorker, type AlertRow } from "@/lib/worker/alerts";
 import { subscribeChatNotifications, type ChatNotification } from "@/lib/worker/chatNotifications";
@@ -42,10 +47,14 @@ import {
   syncWorkSession,
   endWorkSession,
   workedMs,
+  confirmPresenceCheckIn,
+  markSessionIdle,
   type WorkSessionState,
 } from "@/lib/worker/session";
+import type { TaskRow } from "@/lib/worker/tasks";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
 import TasksPanel from "./TasksPanel";
+import ActiveCheckInModal from "./ActiveCheckInModal";
 import { DashboardSkeleton } from "./Skeleton";
 import FirebaseSetupWarning from "./FirebaseSetupWarning";
 import { toast, confirmDialog } from "@/lib/worker/feedback";
@@ -111,6 +120,12 @@ type WorkerDoc = {
 };
 
 const SHIFT_MS = 8 * 60 * 60 * 1000;
+/** 2-hour check-in cycle (120 minutes). */
+const CHECKIN_CYCLE_MS = 2 * 60 * 60 * 1000;
+/** 10-minute early check-in window at the end of every 2 hours (600 seconds). */
+const CHECKIN_EARLY_WINDOW_SECONDS = 10 * 60;
+/** Trigger point: 1h 50m into the 2h cycle (10 minutes before the 2 hours end). */
+const CHECKIN_TRIGGER_MS = CHECKIN_CYCLE_MS - CHECKIN_EARLY_WINDOW_SECONDS * 1000;
 
 const ICON = {
   tasks: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4",
@@ -247,6 +262,14 @@ export default function DashboardApp() {
   const [adjustments, setAdjustments] = useState<PayrollAdjustment[]>([]);
   const [exceptionSubmitting, setExceptionSubmitting] = useState(false);
   const [taskStats, setTaskStats] = useState({ total: 0, completed: 0, pending: 0, review: 0, rate: 0 });
+  const [myActiveTasks, setMyActiveTasks] = useState<TaskRow[]>([]);
+  const [selectedShiftTaskIds, setSelectedShiftTaskIds] = useState<string[]>([]);
+  const [shiftTaskNote, setShiftTaskNote] = useState("");
+  const [checkInModalOpen, setCheckInModalOpen] = useState(false);
+  const [checkInSecondsRemaining, setCheckInSecondsRemaining] = useState(CHECKIN_EARLY_WINDOW_SECONDS);
+  const [isWorkerIdle, setIsWorkerIdle] = useState(false);
+  const lastCheckInTimeRef = useRef<number>(Date.now());
+  const checkInNotifiedRef = useRef(false);
   const [online, setOnline] = useState(true);
   const [lastSyncAt, setLastSyncAt] = useState<Date | null>(null);
   const [soundOn, setSoundOn] = useState(true);
@@ -375,12 +398,13 @@ export default function DashboardApp() {
           email: data.email,
         });
         setSession(ws);
-      } else if (storedMode === "view-only") {
-        setShiftMode("view-only");
-        setSession(null);
+        const storedLastCheckIn = parseInt(sessionStorage.getItem("workerLastCheckInTime") || "0", 10);
+        const initialCheckInTs = storedLastCheckIn > 0 ? storedLastCheckIn : (ws?.segmentStart.getTime() ?? Date.now());
+        lastCheckInTimeRef.current = initialCheckInTs;
+        sessionStorage.setItem("workerLastCheckInTime", String(initialCheckInTs));
       } else {
-        // Unselected mode: keep unclocked and open choice modal
-        setShiftMode(null);
+        // Open task selection & shift start modal immediately upon entering the system
+        setShiftMode(storedMode === "view-only" ? "view-only" : null);
         setSession(null);
         setShowShiftChoiceModal(true);
       }
@@ -412,35 +436,86 @@ export default function DashboardApp() {
     return () => unsub();
   }, [router, loadDashboardData]);
 
+  const toggleShiftTaskSelection = useCallback((taskId: string) => {
+    setSelectedShiftTaskIds((prev) =>
+      prev.includes(taskId) ? prev.filter((id) => id !== taskId) : [...prev, taskId],
+    );
+  }, []);
+
   const startActiveShift = useCallback(async () => {
     const fb = getFirebase();
     if (!fb || !uid || !profile || shiftBusy) return;
+
+    const chosenTasks = myActiveTasks
+      .filter((t) => selectedShiftTaskIds.includes(t.id))
+      .map((t) => ({
+        id: t.id,
+        title: t.title || "Untitled Task",
+        projectName: t.projectName,
+      }));
+
+    if (myActiveTasks.length > 0 && chosenTasks.length === 0 && !shiftTaskNote.trim()) {
+      toast.warning("يرجى اختيار المهام التي ستعمل عليها أولاً", {
+        description: "حدد مهمة واحدة على الأقل من قائمتك لبدء الشيفت وإبلاغ الإدارة.",
+      });
+      return;
+    }
+
     setShiftBusy(true);
     try {
-      const ws = await initWorkSession(fb.db, {
-        uid,
-        firstName: profile.firstName,
-        lastName: profile.lastName,
-        email: profile.email,
-      });
+      const ws = await initWorkSession(
+        fb.db,
+        {
+          uid,
+          firstName: profile.firstName,
+          lastName: profile.lastName,
+          email: profile.email,
+        },
+        {
+          selectedTasks: chosenTasks,
+          note: shiftTaskNote.trim() || undefined,
+          sendNotification: true,
+        },
+      );
       if (!ws) throw new Error("no session");
+
+      // Mark any selected "assigned" tasks as "in-progress" automatically
+      for (const t of myActiveTasks) {
+        if (selectedShiftTaskIds.includes(t.id) && t.status === "assigned") {
+          updateDoc(doc(fb.db, "tasks", t.id), {
+            status: "in-progress",
+            startedAt: serverTimestamp(),
+          }).catch(() => {});
+        }
+      }
+
+      const nowTs = Date.now();
       sessionStorage.setItem("workerShiftMode", "clocked-in");
       sessionStorage.setItem("workerLoginTime", ws.startTime.toISOString());
+      sessionStorage.setItem("workerLastCheckInTime", String(nowTs));
+      lastCheckInTimeRef.current = nowTs;
+      checkInNotifiedRef.current = false;
+      setCheckInModalOpen(false);
+      setIsWorkerIdle(false);
+      setCheckInSecondsRemaining(CHECKIN_EARLY_WINDOW_SECONDS);
+
       setSession(ws);
       setShiftMode("clocked-in");
       setShowShiftChoiceModal(false);
       shiftWarningGivenRef.current = false;
-      lastSyncRef.current = Date.now();
+      lastSyncRef.current = nowTs;
       setLastSyncAt(new Date());
       playTerminalBeep();
       // Same-day return after an early leave → refund that early-leave permission.
       if (ws.priorMs > 0) void reverseEarlyLeaveOnReturn(fb.db, uid, localYmd());
       if (ws.priorMs > 60_000) {
-        toast.success("Welcome back — shift resumed", {
-          description: `${formatHM(ws.priorMs)} already logged today. Break time isn't counted.`,
+        toast.success("تم استئناف الشيفت وإبلاغ الإدارة بالمهام ✓", {
+          description: `تم تسجيل ${formatHM(ws.priorMs)} اليوم. التذكير القادم بعد ساعتين.`,
         });
       } else {
-        toast.success("You're clocked in", { description: "Your 8-hour shift has started. Have a great day!" });
+        toast.success("تم بدء الشيفت وإرسال المهام المختارة للإدارة ✓", {
+          description: "سيظهر تنبيه تأكيد الحضور الدوري كل ساعتين (مع مهلة ١٠ دقائق قبل نهاية الساعتين).",
+        });
       }
     } catch (e) {
       console.error("Failed to init work session", e);
@@ -448,15 +523,43 @@ export default function DashboardApp() {
     } finally {
       setShiftBusy(false);
     }
-  }, [uid, profile, shiftBusy]);
+  }, [uid, profile, shiftBusy, myActiveTasks, selectedShiftTaskIds, shiftTaskNote]);
+
+  const handleConfirmCheckIn = useCallback(
+    async (data: { taskId?: string; taskTitle?: string; note?: string }) => {
+      stopContinuousCheckInAlarm();
+      const fb = getFirebase();
+      const ws = sessionRef.current;
+      const nowTs = Date.now();
+      lastCheckInTimeRef.current = nowTs;
+      sessionStorage.setItem("workerLastCheckInTime", String(nowTs));
+      checkInNotifiedRef.current = false;
+      setCheckInModalOpen(false);
+      setIsWorkerIdle(false);
+      setCheckInSecondsRemaining(CHECKIN_EARLY_WINDOW_SECONDS);
+
+      if (fb && ws && uid && profile) {
+        const wName =
+          `${profile.firstName ?? ""} ${profile.lastName ?? ""}`.trim() || (profile.email ?? "Worker");
+        await confirmPresenceCheckIn(fb.db, ws.id, uid, {
+          ...data,
+          workerName: wName,
+        }).catch(() => {});
+      }
+      toast.success("تم تأكيد الحضور وتجديد الشيفت لساعتين كمان ✓", {
+        description: "تم إيقاف صوت التنبيه وبدء دورة ساعتين جديدة.",
+      });
+    },
+    [uid, profile],
+  );
 
   const chooseBrowseMode = useCallback(() => {
     sessionStorage.setItem("workerShiftMode", "view-only");
     sessionStorage.removeItem("workerLoginTime");
     setShiftMode("view-only");
     setShowShiftChoiceModal(false);
-    toast.info("Browsing without clocking in", {
-      description: "Clock in any time from the top bar when you're ready to start.",
+    toast.info("وضع التصفح بدون بدء الشيفت", {
+      description: "يمكنك اختيار المهام وبدء الشيفت في أي وقت من الشريط العلوي.",
     });
   }, []);
 
@@ -482,6 +585,9 @@ export default function DashboardApp() {
       });
       if (!ok) return;
     }
+    stopContinuousCheckInAlarm();
+    setCheckInModalOpen(false);
+    setIsWorkerIdle(false);
     setShiftBusy(true);
     try {
       let banked = ws;
@@ -529,6 +635,7 @@ export default function DashboardApp() {
     }
 
     loggingOutRef.current = true;
+    stopContinuousCheckInAlarm();
     teardownListeners();
 
     const fb = getFirebase();
@@ -744,11 +851,10 @@ export default function DashboardApp() {
     }
   }, [uid, profile, overtimeMinutes]);
 
-  /** Session duration display + Firebase sync + 8h shift limit + warning */
+  /** Session duration display + Firebase sync + 8h shift limit + warning + 2h check-in (10m early window) */
   useEffect(() => {
     if (!uid || shiftMode !== "clocked-in") return;
 
-    const tickMs = reducedMotion ? 5000 : 1000;
     const id = window.setInterval(() => {
       if (loggingOutRef.current) return;
       bumpSessionRender((t) => t + 1);
@@ -756,11 +862,48 @@ export default function DashboardApp() {
       const fb = getFirebase();
       const ws = sessionRef.current;
       if (!ws?.isActive) return;
+      const now = Date.now();
       if (fb) {
-        const now = Date.now();
         if (now - lastSyncRef.current > 15000) {
           lastSyncRef.current = now;
           syncWorkSession(fb.db, ws).then(() => setLastSyncAt(new Date())).catch(() => {});
+        }
+      }
+
+      // 2-hour check-in cycle: opens 10 minutes early before the end of the 2 hours (at 1h 50m)
+      const elapsedSinceCheckIn = Math.max(0, now - lastCheckInTimeRef.current);
+      if (elapsedSinceCheckIn >= CHECKIN_TRIGGER_MS) {
+        const msUntilEnd = Math.max(0, CHECKIN_CYCLE_MS - elapsedSinceCheckIn);
+        const secsLeft = Math.ceil(msUntilEnd / 1000);
+        setCheckInModalOpen(true);
+        setCheckInSecondsRemaining(secsLeft);
+
+        if (!checkInNotifiedRef.current) {
+          checkInNotifiedRef.current = true;
+          void showBackgroundNotification({
+            title: "🔔 موعد تأكيد الحضور الدوري (مهلة ١٠ دقائق)",
+            body: "يتبقى ١٠ دقائق على نهاية الساعتين — ادخل الآن لتأكيد الحضور لساعتين كمان وإيقاف التنبيه.",
+            tab: "time",
+            urgent: true,
+          });
+          if (fb && uid) {
+            void sendWebPushToWorkers(fb.db, {
+              recipientUids: [uid],
+              title: "🔔 موعد تأكيد الحضور الدوري (مهلة ١٠ دقائق)",
+              body: "يتبقى ١٠ دقائق على نهاية الساعتين — ادخل الآن لتأكيد الحضور لساعتين كمان وإيقاف التنبيه.",
+              tab: "time",
+              urgent: true,
+            });
+          }
+        }
+
+        if (secsLeft <= 0 && !isWorkerIdle) {
+          setIsWorkerIdle(true);
+          if (fb && uid) {
+            const wName =
+              `${profile?.firstName ?? ""} ${profile?.lastName ?? ""}`.trim() || (profile?.email ?? uid);
+            void markSessionIdle(fb.db, ws.id, uid, wName);
+          }
         }
       }
 
@@ -815,9 +958,9 @@ export default function DashboardApp() {
           });
         }
       }
-    }, tickMs);
+    }, 1000);
     return () => window.clearInterval(id);
-  }, [uid, shiftMode, overtimeMinutes, shiftCompletedModalOpen, reducedMotion]);
+  }, [uid, profile, shiftMode, overtimeMinutes, shiftCompletedModalOpen, isWorkerIdle]);
 
   /** Best-effort save when the tab is hidden or closed so hours aren't lost. */
   useEffect(() => {
@@ -1167,11 +1310,21 @@ export default function DashboardApp() {
       const nextStatus = new Map<string, string>();
       const myDocs = snap.docs.filter((d) => isTaskAssignedToUid(d.data() as Record<string, unknown>));
 
+      const activeRows: TaskRow[] = [];
       myDocs.forEach((d) => {
-        const s = d.data().status;
-        nextStatus.set(d.id, String(s ?? ""));
+        const data = d.data();
+        const s = String(data.status ?? "assigned");
+        nextStatus.set(d.id, s);
         if (s === "assigned" || s === "in-progress") {
           pendingCount++;
+          activeRows.push({
+            id: d.id,
+            title: String(data.title ?? "Untitled Task"),
+            description: String(data.description ?? ""),
+            status: s,
+            priority: String(data.priority ?? "medium"),
+            projectName: data.projectName ? String(data.projectName) : undefined,
+          });
         }
         if (s === "pending-approval") {
           reviewCount++;
@@ -1179,6 +1332,13 @@ export default function DashboardApp() {
         if (s === "completed") {
           completedCount++;
         }
+      });
+      setMyActiveTasks(activeRows);
+      setSelectedShiftTaskIds((prev) => {
+        if (prev.length > 0) return prev.filter((id) => activeRows.some((r) => r.id === id));
+        const inProg = activeRows.filter((r) => r.status === "in-progress").map((r) => r.id);
+        if (inProg.length > 0) return inProg;
+        return activeRows.length === 1 ? [activeRows[0]!.id] : [];
       });
 
       if (!isInitialRender) {
@@ -1600,7 +1760,7 @@ export default function DashboardApp() {
               </span>
               <button
                 type="button"
-                onClick={() => void startActiveShift()}
+                onClick={() => setShowShiftChoiceModal(true)}
                 disabled={shiftBusy}
                 className="ml-1 inline-flex items-center gap-1 rounded-full bg-emerald-600 px-3 py-1 text-[11px] font-bold text-white shadow-sm transition-colors hover:bg-emerald-500 disabled:opacity-60 cursor-pointer"
               >
@@ -1615,7 +1775,7 @@ export default function DashboardApp() {
             {!onShift && (
               <button
                 type="button"
-                onClick={() => void startActiveShift()}
+                onClick={() => setShowShiftChoiceModal(true)}
                 disabled={shiftBusy}
                 className="md:hidden inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-emerald-500 disabled:opacity-60 transition-colors cursor-pointer"
               >
@@ -2001,12 +2161,12 @@ export default function DashboardApp() {
                 <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
                   <button
                     type="button"
-                    onClick={() => void startActiveShift()}
+                    onClick={() => setShowShiftChoiceModal(true)}
                     disabled={shiftBusy}
                     className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-emerald-600/20 hover:bg-emerald-500 active:scale-95 disabled:opacity-60 transition-all cursor-pointer"
                   >
                     <Icon d={ICON.play} className="h-5 w-5" />
-                    {shiftBusy ? "Starting…" : durationMs > 60_000 ? "Resume shift" : "Clock in & start shift"}
+                    {shiftBusy ? "Starting…" : durationMs > 60_000 ? "Resume shift & select tasks" : "Clock in & select tasks"}
                   </button>
                 </div>
               </div>
@@ -2033,6 +2193,54 @@ export default function DashboardApp() {
                     />
                   </div>
                 </div>
+
+                {/* 2-Hour Check-In Cycle & 10-Minute Early Window Card */}
+                {(() => {
+                  const elapsedCheckIn = Math.max(0, Date.now() - lastCheckInTimeRef.current);
+                  const msUntil2hEnd = Math.max(0, CHECKIN_CYCLE_MS - elapsedCheckIn);
+                  const inEarly10mWindow = elapsedCheckIn >= CHECKIN_TRIGGER_MS;
+                  return (
+                    <div
+                      dir="rtl"
+                      className={`mx-auto mt-5 max-w-lg rounded-2xl border p-3.5 text-right transition-all ${
+                        inEarly10mWindow
+                          ? "border-red-500 bg-red-50/90 dark:border-red-700 dark:bg-red-950/40 animate-pulse"
+                          : "border-emerald-200 bg-emerald-50/60 dark:border-emerald-900/50 dark:bg-emerald-950/20"
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="text-xs font-extrabold text-zinc-900 dark:text-white">
+                            {inEarly10mWindow
+                              ? "🔔 حان موعد الشيك إن الدوري (آخر ١٠ دقائق في الساعتين)!"
+                              : "⏱️ دورة تأكيد الحضور كل ساعتين (مهلة ١٠ دقائق في آخر الساعتين)"}
+                          </div>
+                          <div className="mt-0.5 text-[11px] text-zinc-600 dark:text-zinc-300">
+                            المتبقي على نهاية الساعتين الحاليتين:{" "}
+                            <b dir="ltr" className="font-mono text-emerald-700 dark:text-emerald-300">
+                              {formatSessionDuration(msUntil2hEnd)}
+                            </b>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const secs = Math.max(60, Math.min(CHECKIN_EARLY_WINDOW_SECONDS, Math.ceil(msUntil2hEnd / 1000)));
+                            setCheckInSecondsRemaining(secs);
+                            setCheckInModalOpen(true);
+                          }}
+                          className={`rounded-xl px-3.5 py-2 text-xs font-extrabold text-white shadow-sm transition cursor-pointer ${
+                            inEarly10mWindow
+                              ? "bg-red-600 hover:bg-red-700"
+                              : "bg-emerald-600 hover:bg-emerald-700"
+                          }`}
+                        >
+                          ✓ تأكيد الشيك إن لساعتين كمان
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-xs">
                   <span className="inline-flex items-center rounded-full bg-zinc-100 px-3 py-1 font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
@@ -2880,58 +3088,152 @@ export default function DashboardApp() {
         )}
       </main>
 
-      {/* ── MODAL: Session Start Mode Choice (Clock In vs Browse Mode) ── */}
+      {/* ── MODAL: Session Start Mode Choice & Task Selection ── */}
       {showShiftChoiceModal && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/65 backdrop-blur-sm animate-fade-in"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fade-in"
           role="dialog"
           aria-modal="true"
           aria-labelledby="shift-choice-title"
         >
-          <div className="w-full max-w-xl overflow-hidden rounded-2xl border border-zinc-200 bg-white p-6 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900 animate-scale-in">
-            <h2 id="shift-choice-title" className="text-xl font-bold tracking-tight text-zinc-900 dark:text-white">
-              {greetingFor()}, {firstName}!
-            </h2>
-            <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400 leading-relaxed">
-              {durationMs > 60_000
-                ? `You've already logged ${formatHM(durationMs)} today. Ready to pick up where you left off?`
-                : "Are you starting your workday now, or just checking in?"}
-            </p>
+          <div
+            dir="rtl"
+            className="w-full max-w-xl overflow-hidden rounded-2xl border-2 border-zinc-900 bg-white p-6 shadow-2xl dark:border-zinc-700 dark:bg-zinc-900 animate-scale-in text-right"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-bold text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300">
+                  🟢 بدء يوم العمل وتحديد المهام
+                </span>
+                <h2 id="shift-choice-title" className="mt-1.5 text-xl font-extrabold tracking-tight text-zinc-900 dark:text-white">
+                  أهلاً بك يا {firstName}! اختر المهام التي ستعمل عليها اليوم
+                </h2>
+                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                  {durationMs > 60_000
+                    ? `لقد سجلت ${formatHM(durationMs)} اليوم. حدد المهام التي ستستكمل العمل عليها وسيتم إرسال إشعار فوري للأدمن والأكونت مانجر.`
+                    : "حدد المهام التي ستشتغل عليها في هذا الشيفت، وبمجرد الضغط على (ابدأ الشيفت الآن) سيتم إرسال إشعار فوري للأدمن والأكونت مانجر."}
+                </p>
+              </div>
+            </div>
 
-            <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {/* Task Selection List */}
+            <div className="mt-4 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-extrabold text-zinc-800 dark:text-zinc-200">
+                  📋 المهام المسندة إليك ({myActiveTasks.length}):
+                </label>
+                {myActiveTasks.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (selectedShiftTaskIds.length === myActiveTasks.length) {
+                        setSelectedShiftTaskIds([]);
+                      } else {
+                        setSelectedShiftTaskIds(myActiveTasks.map((t) => t.id));
+                      }
+                    }}
+                    className="text-[11px] font-bold text-emerald-600 hover:underline cursor-pointer"
+                  >
+                    {selectedShiftTaskIds.length === myActiveTasks.length ? "إلغاء تحديد الكل" : "تحديد كل المهام"}
+                  </button>
+                )}
+              </div>
+
+              {myActiveTasks.length > 0 ? (
+                <div className="max-h-52 space-y-1.5 overflow-y-auto rounded-xl border border-zinc-200 bg-zinc-50/70 p-2.5 dark:border-zinc-800 dark:bg-zinc-950/50">
+                  {myActiveTasks.map((t) => {
+                    const checked = selectedShiftTaskIds.includes(t.id);
+                    return (
+                      <label
+                        key={t.id}
+                        className={`flex items-start gap-2.5 rounded-xl border p-2.5 text-xs transition cursor-pointer ${
+                          checked
+                            ? "border-emerald-500 bg-emerald-50/90 dark:border-emerald-600 dark:bg-emerald-950/40"
+                            : "border-zinc-200 bg-white hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleShiftTaskSelection(t.id)}
+                          className="mt-0.5 h-4 w-4 rounded accent-emerald-600 cursor-pointer"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {t.projectName && (
+                              <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-[10px] font-bold text-white dark:bg-zinc-700">
+                                {t.projectName}
+                              </span>
+                            )}
+                            <span className="font-bold text-zinc-900 dark:text-white">{t.title}</span>
+                          </div>
+                          <span className="text-[10px] text-zinc-500">
+                            الحالة: {t.status === "in-progress" ? "قيد التنفيذ" : "مسندة"} · الأولوية: {t.priority || "medium"}
+                          </span>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-dashed border-zinc-300 bg-zinc-50 p-3 text-xs text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800/40">
+                  لا توجد مهام مسندة في القائمة حالياً — يمكنك كتابة المهمة التي ستعمل عليها في الحقل بالأسفل والبدء فوراً.
+                </div>
+              )}
+
+              <div>
+                <label className="block text-[11px] font-bold text-zinc-600 dark:text-zinc-400 mb-1">
+                  مهمة إضافية أو ملاحظة للأدمن والأكونت مانجر (اختياري):
+                </label>
+                <input
+                  type="text"
+                  value={shiftTaskNote}
+                  onChange={(e) => setShiftTaskNote(e.target.value)}
+                  placeholder="مثال: سأبدأ بتعديلات العميل ثم تسليم التصميم..."
+                  className="w-full rounded-xl border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-white"
+                />
+              </div>
+            </div>
+
+            <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
               <button
                 type="button"
                 onClick={() => void startActiveShift()}
                 disabled={shiftBusy}
                 autoFocus
-                className="group flex flex-col items-start rounded-xl border-2 border-emerald-500 bg-emerald-50/50 p-5 text-left transition-all hover:-translate-y-0.5 hover:bg-emerald-50 hover:shadow-lg hover:shadow-emerald-600/10 disabled:opacity-60 dark:border-emerald-600 dark:bg-emerald-950/20 dark:hover:bg-emerald-950/40 cursor-pointer"
+                className="group flex flex-col items-start rounded-xl border-2 border-emerald-500 bg-emerald-50/70 p-4 text-right transition-all hover:-translate-y-0.5 hover:bg-emerald-50 hover:shadow-lg hover:shadow-emerald-600/10 disabled:opacity-60 dark:border-emerald-600 dark:bg-emerald-950/30 dark:hover:bg-emerald-950/50 cursor-pointer"
               >
                 <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-md shadow-emerald-700/20 transition-transform group-hover:scale-105">
                   <Icon d={ICON.play} className="h-5 w-5" />
                 </span>
-                <span className="mt-3 text-sm font-bold text-zinc-900 dark:text-white">
-                  {shiftBusy ? "Starting…" : durationMs > 60_000 ? "Resume my shift" : "Clock in & start shift"}
+                <span className="mt-2.5 text-sm font-extrabold text-zinc-900 dark:text-white">
+                  {shiftBusy
+                    ? "جاري بدء الشيفت..."
+                    : durationMs > 60_000
+                      ? "استئناف الشيفت وإبلاغ الإدارة بالمهام"
+                      : "ابدأ الشيفت الآن وإبلاغ الأدمن والأكونت مانجر"}
                 </span>
-                <span className="mt-1 text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">
-                  Starts your 8-hour clock and records today&apos;s attendance.
+                <span className="mt-1 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-300">
+                  يبدأ عداد الـ ٨ ساعات + إشعار فوري بالمهام المختارة + شيك إن كل ساعتين.
                 </span>
               </button>
 
               <button
                 type="button"
                 onClick={chooseBrowseMode}
-                className="group flex flex-col items-start rounded-xl border border-zinc-200 bg-zinc-50/60 p-5 text-left transition-all hover:-translate-y-0.5 hover:border-zinc-300 hover:bg-zinc-100/70 dark:border-zinc-700 dark:bg-zinc-800/40 dark:hover:border-zinc-600 dark:hover:bg-zinc-800/70 cursor-pointer"
+                className="group flex flex-col items-start rounded-xl border border-zinc-200 bg-zinc-50/60 p-4 text-right transition-all hover:-translate-y-0.5 hover:border-zinc-300 hover:bg-zinc-100/70 dark:border-zinc-700 dark:bg-zinc-800/40 dark:hover:border-zinc-600 dark:hover:bg-zinc-800/70 cursor-pointer"
               >
                 <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-zinc-200 text-zinc-700 transition-transform group-hover:scale-105 dark:bg-zinc-700 dark:text-zinc-200">
                   <Icon d={ICON.eye} className="h-5 w-5" />
                 </span>
-                <span className="mt-3 text-sm font-bold text-zinc-900 dark:text-white">Just browsing</span>
-                <span className="mt-1 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-                  Check tasks and notices without starting the clock.
+                <span className="mt-2.5 text-sm font-bold text-zinc-900 dark:text-white">
+                  تصفح فقط بدون بدء الشيفت (Just Browsing)
+                </span>
+                <span className="mt-1 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+                  الاطلاع على المهام والتنبيهات بدون تشغيل عداد الشيفت حالياً.
                 </span>
               </button>
             </div>
-            <p className="mt-4 text-center text-[11px] text-zinc-400">You can clock in or out any time from the top bar.</p>
           </div>
         </div>
       )}
@@ -3221,6 +3523,16 @@ export default function DashboardApp() {
           onClose={smartLateIn.overwrite ? () => setSmartLateIn(null) : undefined}
         />
       )}
+
+      {/* ── 2-Hour Presence Check-In Modal (opens 10 minutes early before end of 2h cycle with continuous loud alarm) ── */}
+      <ActiveCheckInModal
+        isOpen={checkInModalOpen}
+        workerName={firstName}
+        tasks={myActiveTasks}
+        secondsRemaining={checkInSecondsRemaining}
+        isIdle={isWorkerIdle}
+        onConfirm={handleConfirmCheckIn}
+      />
 
       {/* ── Mobile Bottom Navigation Bar ── */}
       <nav

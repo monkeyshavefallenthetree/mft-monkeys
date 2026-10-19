@@ -43,10 +43,46 @@ export function workedMs(session: WorkSessionState | null, now = Date.now()): nu
 export async function initWorkSession(
   db: Firestore,
   worker: { uid: string; firstName?: string; lastName?: string; email?: string },
+  shiftPlan?: {
+    selectedTasks?: Array<{ id: string; title: string; projectName?: string }>;
+    note?: string;
+    sendNotification?: boolean;
+  },
 ): Promise<WorkSessionState | null> {
   const now = new Date();
   const today = localYmd(now);
   const fullName = `${worker.firstName ?? ""} ${worker.lastName ?? ""}`.trim() || worker.email || "Team Member";
+
+  const selectedTasks = shiftPlan?.selectedTasks ?? [];
+  const taskSummaryList = selectedTasks.map((t) => (t.projectName ? `[${t.projectName}] ${t.title}` : t.title));
+  if (shiftPlan?.note?.trim()) {
+    taskSummaryList.push(shiftPlan.note.trim());
+  }
+  const tasksSummaryText =
+    taskSummaryList.length > 0 ? taskSummaryList.join(" ، ") : "مهام التشغيل العامة (General Tasks)";
+  const shouldNotify = shiftPlan?.sendNotification !== false && Boolean(shiftPlan);
+
+  const sendShiftStartNotification = (isResume: boolean) => {
+    if (!worker.uid || !shouldNotify) return;
+    const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    import("./adminNotifications")
+      .then(({ notifyAdmins }) =>
+        notifyAdmins(db, {
+          targetRoles: ["super_admin", "account_manager", "ops_admin", "hr_admin"],
+          category: "task",
+          eventType: isResume ? "worker_shift_resumed" : "worker_clock_in",
+          title: isResume
+            ? `▶️ استئناف الشيفت وتحديد المهام: ${fullName}`
+            : `🟢 بدء الشيفت واختيار المهام: ${fullName}`,
+          body: `${fullName} ${isResume ? "استأنف الشيفت" : "بدأ الشيفت الآن"} (${timeStr}) وسيعمل على المهام: ${tasksSummaryText}`,
+          href: "/admin/work-sessions",
+          actorUid: worker.uid,
+          actorName: fullName,
+          urgent: true,
+        }),
+      )
+      .catch(() => {});
+  };
 
   const createNew = async (): Promise<WorkSessionState> => {
     const ref = await addDoc(collection(db, "workSessions"), {
@@ -58,6 +94,9 @@ export async function initWorkSession(
       isActive: true,
       presenceStatus: "active",
       lastActiveCheckAt: serverTimestamp(),
+      currentTaskTitle: tasksSummaryText,
+      currentTaskNote: shiftPlan?.note?.trim() || null,
+      shiftTasks: selectedTasks,
       totalWorkTime: 0,
       date: today,
       createdAt: serverTimestamp(),
@@ -68,22 +107,11 @@ export async function initWorkSession(
         presenceStatus: "active",
         lastActiveAt: serverTimestamp(),
         lastActiveCheckAt: serverTimestamp(),
+        currentTaskTitle: tasksSummaryText,
+        currentTaskNote: shiftPlan?.note?.trim() || null,
       }).catch(() => {});
 
-      import("./adminNotifications")
-        .then(({ notifyAdmins }) =>
-          notifyAdmins(db, {
-            targetRoles: ["super_admin", "hr_admin"],
-            category: "hr",
-            eventType: "worker_clock_in",
-            title: `🟢 Shift Started: ${fullName}`,
-            body: `${fullName} clocked in for today's shift (${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}).`,
-            href: "/admin/work-sessions",
-            actorUid: worker.uid,
-            actorName: fullName,
-          }),
-        )
-        .catch(() => {});
+      sendShiftStartNotification(false);
     }
 
     return {
@@ -112,36 +140,34 @@ export async function initWorkSession(
       const wasActive = Boolean(data.isActive);
       const start: Date = data.startTime?.toDate?.() ?? new Date(data.startTime ?? now);
       const priorMs = typeof data.totalWorkTime === "number" ? data.totalWorkTime : 0;
-      await updateDoc(doc(db, "workSessions", existing.id), {
+      const updatePayload: Record<string, unknown> = {
         isActive: true,
         presenceStatus: "active",
         lastLoginTime: now,
         lastActiveCheckAt: serverTimestamp(),
         lastUpdated: serverTimestamp(),
-      });
+      };
+      if (shiftPlan) {
+        updatePayload.currentTaskTitle = tasksSummaryText;
+        updatePayload.currentTaskNote = shiftPlan.note?.trim() || null;
+        updatePayload.shiftTasks = selectedTasks;
+      }
+      await updateDoc(doc(db, "workSessions", existing.id), updatePayload);
 
       if (worker.uid) {
-        updateDoc(doc(db, "workers", worker.uid), {
+        const workerPayload: Record<string, unknown> = {
           presenceStatus: "active",
           lastActiveAt: serverTimestamp(),
           lastActiveCheckAt: serverTimestamp(),
-        }).catch(() => {});
+        };
+        if (shiftPlan) {
+          workerPayload.currentTaskTitle = tasksSummaryText;
+          workerPayload.currentTaskNote = shiftPlan.note?.trim() || null;
+        }
+        updateDoc(doc(db, "workers", worker.uid), workerPayload).catch(() => {});
 
-        if (!wasActive) {
-          import("./adminNotifications")
-            .then(({ notifyAdmins }) =>
-              notifyAdmins(db, {
-                targetRoles: ["super_admin", "hr_admin"],
-                category: "hr",
-                eventType: "worker_shift_resumed",
-                title: `▶️ Shift Resumed: ${fullName}`,
-                body: `${fullName} resumed their shift today (${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}).`,
-                href: "/admin/work-sessions",
-                actorUid: worker.uid,
-                actorName: fullName,
-              }),
-            )
-            .catch(() => {});
+        if (!wasActive || shiftPlan) {
+          sendShiftStartNotification(wasActive || priorMs > 60_000);
         }
       }
 
@@ -235,11 +261,11 @@ export async function confirmPresenceCheckIn(
     import("./adminNotifications")
       .then(({ notifyAdmins }) =>
         notifyAdmins(db, {
-          targetRoles: ["super_admin", "hr_admin", "ops_admin"],
+          targetRoles: ["super_admin", "account_manager", "ops_admin", "hr_admin"],
           category: "hr",
           eventType: "worker_presence_checkin",
-          title: `✅ Active Check-In: ${wName}`,
-          body: `${wName} confirmed active presence — working on "${data.taskTitle || "Active & Available"}"${data.note ? ` (${data.note})` : ""}.`,
+          title: `✅ تأكيد الحضور الدوري (٢ ساعة): ${wName}`,
+          body: `${wName} أكد التواجد لساعتين إضافيتين — يعمل على "${data.taskTitle || "Active & Available"}"${data.note ? ` (${data.note})` : ""}.`,
           href: "/admin/work-sessions",
           actorUid: workerId,
           actorName: wName,
@@ -257,6 +283,7 @@ export async function markSessionIdle(
   db: Firestore,
   sessionId: string,
   workerId: string,
+  workerName?: string,
 ): Promise<void> {
   const sessionRef = doc(db, "workSessions", sessionId);
   await updateDoc(sessionRef, {
@@ -272,19 +299,23 @@ export async function markSessionIdle(
       missedCheckInAt: serverTimestamp(),
     }).catch(() => {});
 
+    const labelName = workerName || workerId;
     import("./adminNotifications")
       .then(({ notifyAdmins }) =>
         notifyAdmins(db, {
-          targetRoles: ["super_admin", "hr_admin"],
+          targetRoles: ["super_admin", "account_manager", "ops_admin", "hr_admin"],
           category: "hr",
           eventType: "missed_checkin",
-          title: "⚠️ Missed 2-Hour Presence Check-In",
-          body: `Worker (${workerId}) did not respond to the active presence check-in window and was marked Idle.`,
+          title: `⚠️ عدم استجابة للشيك إن الدوري: ${labelName}`,
+          body: `لم يقم ${labelName} بتأكيد الحضور خلال مهلة الـ ١٠ دقائق في نهاية الساعتين وتم تسجيله كـ غير مستجيب (Idle).`,
           href: "/admin/work-sessions",
           actorUid: workerId,
+          actorName: labelName,
+          urgent: true,
         }),
       )
       .catch(() => {});
   }
 }
+
 
