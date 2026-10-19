@@ -19,7 +19,11 @@ import {
 } from "firebase/firestore";
 import type { ClockInEvaluation, EarlyLeaveEvaluation, PermissionLedgerEntry } from "./hrPolicy2026";
 
-export type WorkerLedgerDoc = PermissionLedgerEntry & { id: string; reversedReason?: string };
+export type WorkerLedgerDoc = PermissionLedgerEntry & {
+  id: string;
+  reversedReason?: string;
+  requestStatus?: "pending" | "approved";
+};
 
 export const ledgerId = (workerId: string, date: string, kind: "late" | "early") => `${workerId}_${date}_${kind}`;
 

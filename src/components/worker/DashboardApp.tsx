@@ -324,7 +324,64 @@ export default function DashboardApp() {
   const [lateMinsInput, setLateMinsInput] = useState(30);
   const policyCfg = useMemo(() => policyConfigFromSettings(hrSettings), [hrSettings]);
   const policyActive = isPolicy2026Active(hrSettings, localYmd());
-  const policyUsage = useMemo(() => usageFromLedger(ledger), [ledger]);
+  const effectiveLedger = useMemo(() => {
+    const range = getPayrollCycleRange(new Date(), hrSettings.monthStartDay);
+    const curYm = localYmd().slice(0, 7);
+    const out: WorkerLedgerDoc[] = ledger.map((e) => ({ ...e }));
+
+    for (const x of exceptions) {
+      const t = String(x.type || "");
+      if (t !== "advance_late" && t !== "early_permission" && !(t === "late" && x.status === "approved")) {
+        continue;
+      }
+      const status = String(x.status || "pending");
+      if (status === "rejected") continue;
+
+      const d = String(x.exceptionDate || localYmd());
+      const inCycle = (d >= range.startYmd && d <= range.endYmd) || d.slice(0, 7) === curYm;
+      if (!inCycle) continue;
+
+      const kind: "late" | "early_leave" = t === "early_permission" ? "early_leave" : "late";
+      const actualMins = Math.max(1, Number(x.lateMinutes) || 30);
+      const chargedMins = t === "late" ? 0 : chargeableMinutes(actualMins, policyCfg);
+      const reqState: "pending" | "approved" = status === "approved" ? "approved" : "pending";
+
+      const existingIdx = out.findIndex(
+        (row) =>
+          row.date === d &&
+          row.kind === kind &&
+          row.status === "applied" &&
+          !row.id.startsWith("req_") &&
+          (!row.covered || status === "approved"),
+      );
+      if (existingIdx >= 0) {
+        out[existingIdx] = {
+          ...out[existingIdx]!,
+          actualMinutes: actualMins,
+          chargedMinutes: chargedMins,
+          covered: true,
+          requestStatus: reqState,
+        };
+      } else {
+        out.push({
+          id: `req_${x.id}`,
+          workerId: String(x.workerId || uid || ""),
+          date: d,
+          kind,
+          actualMinutes: actualMins,
+          chargedMinutes: chargedMins,
+          covered: true,
+          status: "applied",
+          source: status === "approved" ? "admin" : "worker",
+          requestStatus: reqState,
+        });
+      }
+    }
+
+    out.sort((a, b) => b.date.localeCompare(a.date));
+    return out;
+  }, [ledger, exceptions, uid, hrSettings.monthStartDay, policyCfg]);
+  const policyUsage = useMemo(() => usageFromLedger(effectiveLedger), [effectiveLedger]);
   const policyOffDay =
     (hrSettings.weekendDays || [5, 6]).includes(new Date().getDay()) || !!isDateHoliday(localYmd(), holidays);
   const policyRef = useRef<{ active: boolean; offDay: boolean; cfg: Policy2026Config; usage: CycleUsage }>({
@@ -1613,9 +1670,35 @@ export default function DashboardApp() {
       toast.warning("For overtime request, enter minutes between 15 and 360.");
       return;
     }
-    if (type === "advance_request" && (!requestedAmount || requestedAmount <= 0)) {
-      toast.warning("Please specify a valid requested salary advance amount.");
-      return;
+    if (type === "advance_request") {
+      if (!requestedAmount || requestedAmount <= 0) {
+        toast.warning("يرجى إدخال قيمة صحيحة للسلفة المطلوبة.");
+        return;
+      }
+      const range = getPayrollCycleRange(new Date(), hrSettings.monthStartDay);
+      const curYm = localYmd().slice(0, 7);
+      const approvedAdv = adjustments
+        .filter((a) => a.type === "advance" && a.status !== "cancelled" && a.date >= range.startYmd && a.date <= range.endYmd)
+        .reduce((acc, a) => acc + (Number(a.amount) || 0), 0);
+      const pendingAdv = exceptions
+        .filter((x) => {
+          const d = String(x.exceptionDate || localYmd());
+          return (
+            x.type === "advance_request" &&
+            (!x.status || x.status === "pending") &&
+            ((d >= range.startYmd && d <= range.endYmd) || d.slice(0, 7) === curYm)
+          );
+        })
+        .reduce((acc, x) => acc + (Number(x.requestedAmount) || 0), 0);
+      const monthlySalary = Number(profile.expectedSalary) || 0;
+      if (monthlySalary > 0 && approvedAdv + pendingAdv + requestedAmount > monthlySalary) {
+        const rem = Math.max(0, monthlySalary - approvedAdv - pendingAdv);
+        toast.error("لا يمكن إرسال طلب السلفة — يتجاوز المتبقي من الراتب", {
+          description: `الراتب المسجل: ${monthlySalary} — السلف المسجلة/المعلقة: ${approvedAdv + pendingAdv} — المتاح للسحب: ${rem}.`,
+          duration: 9000,
+        });
+        return;
+      }
     }
     const leaveDaysRaw = fd.get("leaveDays");
     const computedRangeDays = isLeave ? calcInclusiveDays(exceptionDate, endDate || exceptionDate) : 1;
@@ -1626,11 +1709,15 @@ export default function DashboardApp() {
         return;
       }
     }
-    if (type === "annual_leave") {
-      // HR-POL-2026: no annual leave during probation or when balance is 0, no negative balance, 0.5-day steps.
+    if (type === "annual_leave" || type === "emergency_leave") {
+      // HR-POL-2026: no paid annual/emergency leave during probation or when balance is 0, no negative balance, 0.5-day steps.
       const hire = profile.hireDate || (profile.createdAt?.toDate ? localYmd(profile.createdAt.toDate()) : localYmd());
       const booked = exceptions
-        .filter((x) => x.type === "annual_leave" && (!x.status || x.status === "pending" || x.status === "approved"))
+        .filter(
+          (x) =>
+            (x.type === "annual_leave" || x.type === "emergency_leave") &&
+            (!x.status || x.status === "pending" || x.status === "approved"),
+        )
         .map((x) => ({ date: String(x.exceptionDate ?? ""), days: Number(x.leaveDays) || 1 }));
       const acc = computeLeaveAccrual(
         hire,
@@ -1646,7 +1733,7 @@ export default function DashboardApp() {
       );
       const verdict = validateLeaveRequest(acc, leaveDaysVal || 0);
       if (acc.requestableDays <= 0 || !verdict.ok) {
-        toast.error("لا يمكن إرسال طلب الإجازة السنوية المدفوعة", {
+        toast.error("لا يمكن إرسال طلب الإجازة المدفوعة من الرصيد السنوي", {
           description: `${!verdict.ok ? verdict.reasonAr : "رصيدك المتاح حالياً هو (٠ يوم)."} — يمكنك اختيار «إجازة بدون مرتب (Unpaid Leave)».`,
           duration: 9000,
         });
@@ -1711,15 +1798,15 @@ export default function DashboardApp() {
           : type === "advance_request"
           ? "Advance request sent"
           : type === "advance_late"
-          ? "تم إرسال طلب إذن التأخير للأدمن للموافقة ⏳"
+          ? "تم إرسال طلب إذن التأخير وتم حجزه في رصيد الأذونات ⏳"
           : type === "early_permission"
-          ? "تم إرسال طلب إذن الانصراف المبكر للأدمن للموافقة ⏳"
+          ? "تم إرسال طلب إذن الانصراف المبكر وتم حجزه في رصيد الأذونات ⏳"
           : type === "unpaid_leave"
           ? "تم إرسال طلب الإجازة بدون مرتب ✓"
           : "Request sent to HR",
         {
           description: isPermissionReq
-            ? `تم طلب إذن مدته ${effectiveMinutes} دقيقة ليوم ${exceptionDate}. لن يُحتسب الإذن أو يُخصم من الرصيد إلا بعد موافقة الأدمن.`
+            ? `تم تسجيل وحجز إذن مدته ${effectiveMinutes} دقيقة ليوم ${exceptionDate} من رصيد أذوناتك الشهري (بانتظار اعتماد الأدمن).`
             : extendsToday
               ? `Today's shift extended by ${effectiveMinutes} minutes. You'll be notified when it's reviewed.`
               : "You'll get a notification here as soon as it's reviewed.",
@@ -1777,16 +1864,50 @@ export default function DashboardApp() {
   const cycleAdvances = cycleAdjustments
     .filter((a) => a.type === "advance" && a.status !== "cancelled")
     .reduce((acc, a) => acc + (Number(a.amount) || 0), 0);
+  const pendingCycleAdvances = exceptions
+    .filter((x) => {
+      const d = String(x.exceptionDate || todayYmd);
+      return (
+        x.type === "advance_request" &&
+        (!x.status || x.status === "pending") &&
+        ((d >= cycleRange.startYmd && d <= cycleRange.endYmd) || d.slice(0, 7) === todayYmd.slice(0, 7))
+      );
+    })
+    .reduce((acc, x) => acc + (Number(x.requestedAmount) || 0), 0);
   const cycleAllowances = cycleAdjustments
     .filter((a) => a.type === "allowance" && a.status !== "cancelled")
     .reduce((acc, a) => acc + (Number(a.amount) || 0), 0);
+  const approvedCycleOtMins = exceptions
+    .filter((x) => {
+      const d = String(x.exceptionDate || todayYmd);
+      return (
+        x.type === "overtime" &&
+        x.status === "approved" &&
+        ((d >= cycleRange.startYmd && d <= cycleRange.endYmd) || d.slice(0, 7) === todayYmd.slice(0, 7))
+      );
+    })
+    .reduce((acc, x) => acc + (Number(x.lateMinutes) || 0), 0);
+  const pendingCycleOtMins = exceptions
+    .filter((x) => {
+      const d = String(x.exceptionDate || todayYmd);
+      return (
+        x.type === "overtime" &&
+        (!x.status || x.status === "pending") &&
+        ((d >= cycleRange.startYmd && d <= cycleRange.endYmd) || d.slice(0, 7) === todayYmd.slice(0, 7))
+      );
+    })
+    .reduce((acc, x) => acc + (Number(x.lateMinutes) || 0), 0);
 
   // HR-POL-2026 derived values (Time tab card & Exceptions tab)
   const todayRequiredEnd = firstClockIn && localYmd(firstClockIn) === todayYmd ? requiredShiftEnd(firstClockIn, policyCfg) : null;
   const hireFromProfile = profile.hireDate || null;
   const hireFallback = !hireFromProfile && profile.createdAt?.toDate ? localYmd(profile.createdAt.toDate()) : null;
   const bookedLeave = exceptions
-    .filter((x) => x.type === "annual_leave" && (!x.status || x.status === "pending" || x.status === "approved"))
+    .filter(
+      (x) =>
+        (x.type === "annual_leave" || x.type === "emergency_leave") &&
+        (!x.status || x.status === "pending" || x.status === "approved"),
+    )
     .map((x) => ({ date: String(x.exceptionDate ?? ""), days: Number(x.leaveDays) || 1 }));
   const effectiveHire = hireFromProfile ?? hireFallback ?? todayYmd;
   const leaveAccrual = computeLeaveAccrual(
@@ -1801,9 +1922,9 @@ export default function DashboardApp() {
     },
     policyCfg,
   );
-  const todayLateEntry = ledger.find((e) => e.date === todayYmd && e.kind === "late" && e.status === "applied") ?? null;
+  const todayLateEntry = effectiveLedger.find((e) => e.date === todayYmd && e.kind === "late" && e.status === "applied") ?? null;
   const usageBeforeTodayLate = usageFromLedger(
-    ledger.filter((e) => !(e.date === todayYmd && e.kind === "late")),
+    effectiveLedger.filter((e) => !(e.date === todayYmd && e.kind === "late")),
   );
 
   const firstName = profile.firstName || "there";
@@ -2472,6 +2593,11 @@ export default function DashboardApp() {
                     <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">Advances (سلف)</span>
                     <p className="mt-0.5 font-mono text-sm font-bold text-amber-700 dark:text-amber-400">
                       {cycleAdvances > 0 ? `$${cycleAdvances.toLocaleString()}` : "$0"}
+                      {pendingCycleAdvances > 0 && (
+                        <span className="block text-[10px] font-semibold text-amber-600">
+                          +${pendingCycleAdvances.toLocaleString()} قيد المراجعة
+                        </span>
+                      )}
                     </p>
                   </div>
                   <div className="rounded-lg bg-zinc-50 p-2 dark:bg-zinc-900/60">
@@ -2513,7 +2639,7 @@ export default function DashboardApp() {
               policyActive={policyActive}
               effectiveFrom={hrSettings.policy2026EffectiveFrom ?? ""}
               usage={policyUsage}
-              ledger={ledger}
+              ledger={effectiveLedger}
               requiredEnd={todayRequiredEnd}
               now={new Date()}
               hireDate={hireFromProfile ?? hireFallback}
@@ -2534,6 +2660,10 @@ export default function DashboardApp() {
               }}
               onRequestAdvanceLate={() => {
                 setExceptionType("advance_late");
+                setTab("exceptions");
+              }}
+              onRequestEarlyPermission={() => {
+                setExceptionType("early_permission");
                 setTab("exceptions");
               }}
               onRequestOvertime={() => {
@@ -2660,65 +2790,101 @@ export default function DashboardApp() {
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               {/* Form */}
               <div className="ui-card p-6">
-                <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-                  <h3 className="text-sm font-bold text-zinc-900 dark:text-white">New request</h3>
-                  <div
-                    dir="rtl"
-                    className={`inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-xs font-extrabold ${
-                      leaveAccrual.requestableDays > 0 && leaveAccrual.phase !== "probation"
-                        ? "border-sky-300 bg-sky-50 text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200"
-                        : "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
-                    }`}
-                  >
-                    <span>🌴 رصيد إجازاتك السنوية المتاح:</span>
-                    <span className="rounded-lg bg-white px-2 py-0.5 font-mono text-sm font-black shadow-2xs dark:bg-zinc-900">
-                      {toArabicDigits(leaveAccrual.requestableDays)} يوم
-                    </span>
-                    <span className="text-[11px] font-semibold opacity-80">
-                      ({leavePhaseLabelAr(leaveAccrual)})
-                    </span>
-                  </div>
-                </div>
+                {(() => {
+                  const permRemTop = remainingQuota(policyUsage, policyCfg);
+                  const hasPermBalance = permRemTop.count > 0 && permRemTop.minutes >= policyCfg.permissionMinMinutes;
+                  return (
+                    <div className="mb-4 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="text-sm font-bold text-zinc-900 dark:text-white">New request</h3>
+                      </div>
+                      <div dir="rtl" className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div
+                          className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-xs font-extrabold ${
+                            hasPermBalance
+                              ? "border-indigo-300 bg-indigo-50/80 text-indigo-950 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-200"
+                              : "border-red-300 bg-red-50 text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200"
+                          }`}
+                        >
+                          <span>⏱️ رصيد الأذونات المتاح (تأخير/مبكر):</span>
+                          <span className="rounded-lg bg-white px-2 py-0.5 font-mono text-xs font-black shadow-2xs dark:bg-zinc-900">
+                            {toArabicDigits(permRemTop.count)}/{toArabicDigits(policyCfg.permissionMaxCount)} أذونات ·{" "}
+                            {toArabicDigits(permRemTop.minutes)} د
+                          </span>
+                        </div>
+                        <div
+                          className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-xs font-extrabold ${
+                            leaveAccrual.requestableDays > 0 && leaveAccrual.phase !== "probation"
+                              ? "border-sky-300 bg-sky-50/80 text-sky-950 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200"
+                              : "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+                          }`}
+                        >
+                          <span>🌴 رصيد الإجازات السنوية المتاح:</span>
+                          <span className="rounded-lg bg-white px-2 py-0.5 font-mono text-xs font-black shadow-2xs dark:bg-zinc-900">
+                            {toArabicDigits(leaveAccrual.requestableDays)} يوم ({leavePhaseLabelAr(leaveAccrual)})
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
                 <form onSubmit={(e) => void onExceptionSubmit(e)} className="space-y-4">
                   <div>
                     <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5" htmlFor="exceptionType">
                       Request type *
                     </label>
                     <input type="hidden" id="exceptionType" name="exceptionType" value={exceptionType} />
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2" role="radiogroup" aria-label="Request type">
-                      {([
-                        ["advance_late", "إذن تأخير شهري (Late Permission)", ICON.time],
-                        ["early_permission", "إذن انصراف مبكر (Early Permission)", ICON.time],
-                        ["unpaid_leave", "Unpaid Leave (إجازة بدون مرتب)", ICON.calendar],
-                        ["late", "Late Excuse (استثناء تأخير)", ICON.time],
-                        ["absent", "Absence Excuse (عذر غياب)", ICON.exceptions],
-                        ["overtime", "Overtime (إضافي)", ICON.bolt],
-                        [
-                          "annual_leave",
-                          `Annual Leave (إجازة سنوية — رصيدك: ${toArabicDigits(leaveAccrual.requestableDays)} يوم)`,
-                          ICON.calendar,
-                        ],
-                        ["sick_leave", "Sick Leave (مرضية)", ICON.shield],
-                        ["emergency_leave", "Emergency (عارضة)", ICON.sparkles],
-                        ["advance_request", "Salary Advance (سلفة)", ICON.cash],
-                      ] as const).map(([val, label, icon]) => (
-                        <button
-                          key={val}
-                          type="button"
-                          role="radio"
-                          aria-checked={exceptionType === val}
-                          onClick={() => setExceptionType(val)}
-                          className={`flex items-center gap-2 rounded-xl border p-2.5 text-xs font-semibold transition-all cursor-pointer ${
-                            exceptionType === val
-                              ? "border-red-500 bg-red-50 text-red-700 ring-2 ring-red-500/15 dark:border-red-500 dark:bg-red-950/40 dark:text-red-300 font-bold"
-                              : "border-zinc-200 text-zinc-600 hover:border-zinc-300 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                          } ${val === "advance_request" ? "col-span-2 sm:col-span-3 border-amber-300 bg-amber-50/40 text-amber-900 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-200" : ""}`}
-                        >
-                          <Icon d={icon} className="h-4 w-4 shrink-0" />
-                          <span className="truncate">{label}</span>
-                        </button>
-                      ))}
-                    </div>
+                    {(() => {
+                      const permRemBtn = remainingQuota(policyUsage, policyCfg);
+                      return (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2" role="radiogroup" aria-label="Request type">
+                          {([
+                            [
+                              "advance_late",
+                              `إذن تأخير شهري (${toArabicDigits(permRemBtn.count)} إذن / ${toArabicDigits(permRemBtn.minutes)} د)`,
+                              ICON.time,
+                            ],
+                            [
+                              "early_permission",
+                              `إذن انصراف مبكر (${toArabicDigits(permRemBtn.count)} إذن / ${toArabicDigits(permRemBtn.minutes)} د)`,
+                              ICON.time,
+                            ],
+                            ["unpaid_leave", "Unpaid Leave (إجازة بدون مرتب)", ICON.calendar],
+                            ["late", "Late Excuse (استثناء تأخير)", ICON.time],
+                            ["absent", "Absence Excuse (عذر غياب)", ICON.exceptions],
+                            ["overtime", "Overtime (إضافي)", ICON.bolt],
+                            [
+                              "annual_leave",
+                              `Annual Leave (إجازة سنوية — رصيدك: ${toArabicDigits(leaveAccrual.requestableDays)} يوم)`,
+                              ICON.calendar,
+                            ],
+                            ["sick_leave", "Sick Leave (مرضية)", ICON.shield],
+                            [
+                              "emergency_leave",
+                              `Emergency (إجازة عارضة — رصيدك: ${toArabicDigits(leaveAccrual.requestableDays)} يوم)`,
+                              ICON.sparkles,
+                            ],
+                            ["advance_request", "Salary Advance (سلفة)", ICON.cash],
+                          ] as const).map(([val, label, icon]) => (
+                            <button
+                              key={val}
+                              type="button"
+                              role="radio"
+                              aria-checked={exceptionType === val}
+                              onClick={() => setExceptionType(val)}
+                              className={`flex items-center gap-2 rounded-xl border p-2.5 text-xs font-semibold transition-all cursor-pointer ${
+                                exceptionType === val
+                                  ? "border-red-500 bg-red-50 text-red-700 ring-2 ring-red-500/15 dark:border-red-500 dark:bg-red-950/40 dark:text-red-300 font-bold"
+                                  : "border-zinc-200 text-zinc-600 hover:border-zinc-300 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                              } ${val === "advance_request" ? "col-span-2 sm:col-span-3 border-amber-300 bg-amber-50/40 text-amber-900 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-200" : ""}`}
+                            >
+                              <Icon d={icon} className="h-4 w-4 shrink-0" />
+                              <span className="truncate">{label}</span>
+                            </button>
+                          ))}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {(exceptionType === "advance_late" || exceptionType === "early_permission") && (() => {
@@ -2756,7 +2922,7 @@ export default function DashboardApp() {
                           <li>• <b>الحد الأقصى الشهري:</b> 4 أذونات في الشهر فقط، بإجمالي لا يتجاوز 4 ساعات (240 دقيقة) شهرياً.</li>
                           <li>• <b>المدد المسموح بها:</b> الحد الأدنى للإذن الواحد 30 دقيقة، والحد الأقصى ساعتان (120 دقيقة).</li>
                           <li>• <b>احتساب تأخير البصمة (قاعدة الدقيقة الأولى):</b> أي تأخير ولو بدقيقة واحدة (مثل 11:01 بدلاً من 11:00) يُحتسب بحد أدنى نصف ساعة (30 دقيقة) وتُخصم من رصيد الساعات المتاح.</li>
-                          <li>• <b>موافقة الإدارة:</b> لا يُحتسب الإذن تلقائياً لوحده — يجب أن يوافق الأدمن على الطلب أولاً ليتم خصمه من رصيد الأذونات.</li>
+                          <li>• <b>موافقة الإدارة:</b> يُحجز الإذن من رصيدك فور إرساله، ويُعتمد رسمياً بعد موافقة الأدمن (إذا رُفض يعود الرصيد تلقائياً).</li>
                         </ul>
 
                         {/* Duration Picker Based on Available Balance */}
@@ -2824,7 +2990,7 @@ export default function DashboardApp() {
                           </div>
                         ) : (
                           <div className="rounded-xl border border-emerald-300 bg-emerald-50/90 p-3 text-xs leading-5 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200">
-                            ✓ <b>متاح للطلب ({toArabicDigits(permVerdict.chargedMinutes)} دقيقة):</b> سيتم إرسال الطلب للأدمن للموافقة، وعند اعتماده يتبقى لك{" "}
+                            ✓ <b>متاح للطلب ({toArabicDigits(permVerdict.chargedMinutes)} دقيقة):</b> سيتم إرسال الطلب للأدمن للموافقة وحجزه من رصيدك، ويتبقى لك{" "}
                             <b>{toArabicDigits(Math.max(0, permRem.count - 1))} أذونات</b> و{" "}
                             <b>{toArabicDigits(Math.max(0, permRem.minutes - permVerdict.chargedMinutes))} دقيقة</b> هذا الشهر.
                           </div>
@@ -2870,7 +3036,18 @@ export default function DashboardApp() {
                   )}
 
                   {exceptionType === "overtime" && (
-                    <div>
+                    <div className="space-y-2.5">
+                      <div dir="rtl" className="rounded-xl border border-amber-200 bg-amber-50/60 p-3 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/25 dark:text-amber-200">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-bold">🌙 رصيد العمل الإضافي المسجل في هذه الدورة:</span>
+                          <span className="font-mono font-bold">
+                            {toArabicDigits(approvedCycleOtMins)} د معتمد · {toArabicDigits(pendingCycleOtMins)} د قيد المراجعة
+                          </span>
+                        </div>
+                        <p className="mt-1 text-[11px] opacity-85">
+                          يُحسب العمل الإضافي المعتمد بمعامل {toArabicDigits(policyCfg.dayOtMultiplier)}x نهاري و{toArabicDigits(policyCfg.nightOtMultiplier)}x ليلي ويُضاف تلقائياً للراتب.
+                        </p>
+                      </div>
                       <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="lateMinutes">
                         Requested Overtime Minutes (15–360) *
                       </label>
@@ -2888,46 +3065,67 @@ export default function DashboardApp() {
                     </div>
                   )}
 
-                  {exceptionType === "advance_request" && (
-                    <div className="rounded-xl border border-amber-300 bg-amber-50/70 p-4 dark:border-amber-900/60 dark:bg-amber-950/30 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <label className="block text-xs font-bold text-amber-900 dark:text-amber-200" htmlFor="requestedAmount">
-                          Requested Advance Amount (EGP / $) *
-                        </label>
-                        <span className="text-[10px] font-medium text-amber-700 dark:text-amber-400">
-                          Deducted from next payroll
-                        </span>
+                  {exceptionType === "advance_request" && (() => {
+                    const monthlySalary = Number(profile.expectedSalary) || 0;
+                    const totalBookedAdv = cycleAdvances + pendingCycleAdvances;
+                    const remSalary = monthlySalary > 0 ? Math.max(0, monthlySalary - totalBookedAdv) : null;
+                    const overSalary = remSalary !== null && advanceAmount > remSalary;
+                    return (
+                      <div className="rounded-xl border border-amber-300 bg-amber-50/70 p-4 dark:border-amber-900/60 dark:bg-amber-950/30 space-y-3">
+                        <div dir="rtl" className="rounded-xl bg-white/80 p-3 text-xs dark:bg-zinc-900/70 space-y-1.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2 font-bold text-amber-950 dark:text-amber-200">
+                            <span>💰 رصيد السلف في هذه الدورة:</span>
+                            <span className="font-mono">
+                              معتمد: ${cycleAdvances.toLocaleString()} · معلق: ${pendingCycleAdvances.toLocaleString()}
+                              {remSalary !== null ? ` · المتاح من الراتب: $${remSalary.toLocaleString()}` : ""}
+                            </span>
+                          </div>
+                          {overSalary && (
+                            <p className="text-red-700 dark:text-red-300 font-bold">
+                              ❌ المبلغ المطلوب (${advanceAmount}) يتجاوز المتبقي من راتبك المسجل (${remSalary}) بعد خصم السلف الحالية.
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <label className="block text-xs font-bold text-amber-900 dark:text-amber-200" htmlFor="requestedAmount">
+                            Requested Advance Amount (EGP / $) *
+                          </label>
+                          <span className="text-[10px] font-medium text-amber-700 dark:text-amber-400">
+                            Deducted from next payroll
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {[200, 500, 1000, 2000].map((preset) => (
+                            <button
+                              key={preset}
+                              type="button"
+                              onClick={() => setAdvanceAmount(preset)}
+                              className={`rounded-lg border px-3 py-1 text-xs font-bold transition-all cursor-pointer ${
+                                advanceAmount === preset
+                                  ? "border-amber-600 bg-amber-600 text-white shadow-sm"
+                                  : "border-amber-300 bg-white text-amber-900 hover:bg-amber-100 dark:border-amber-800 dark:bg-zinc-800 dark:text-amber-300"
+                              }`}
+                            >
+                              ${preset}
+                            </button>
+                          ))}
+                        </div>
+                        <input
+                          id="requestedAmount"
+                          name="requestedAmount"
+                          type="number"
+                          min={50}
+                          max={remSalary !== null && remSalary > 0 ? remSalary : undefined}
+                          step={50}
+                          value={advanceAmount}
+                          onChange={(e) => setAdvanceAmount(Number(e.target.value) || 0)}
+                          required
+                          className="brutal-input bg-white dark:bg-zinc-900"
+                          placeholder="Advance amount"
+                        />
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        {[200, 500, 1000, 2000].map((preset) => (
-                          <button
-                            key={preset}
-                            type="button"
-                            onClick={() => setAdvanceAmount(preset)}
-                            className={`rounded-lg border px-3 py-1 text-xs font-bold transition-all cursor-pointer ${
-                              advanceAmount === preset
-                                ? "border-amber-600 bg-amber-600 text-white shadow-sm"
-                                : "border-amber-300 bg-white text-amber-900 hover:bg-amber-100 dark:border-amber-800 dark:bg-zinc-800 dark:text-amber-300"
-                            }`}
-                          >
-                            ${preset}
-                          </button>
-                        ))}
-                      </div>
-                      <input
-                        id="requestedAmount"
-                        name="requestedAmount"
-                        type="number"
-                        min={50}
-                        step={50}
-                        value={advanceAmount}
-                        onChange={(e) => setAdvanceAmount(Number(e.target.value) || 0)}
-                        required
-                        className="brutal-input bg-white dark:bg-zinc-900"
-                        placeholder="Advance amount"
-                      />
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {["annual_leave", "unpaid_leave", "sick_leave", "emergency_leave"].includes(exceptionType) ? (
                     <div dir="rtl" className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50/60 p-4 dark:border-zinc-800 dark:bg-zinc-900/50">
@@ -2935,7 +3133,8 @@ export default function DashboardApp() {
                         const leaveVerdict = validateLeaveRequest(leaveAccrual, leaveDays);
                         const noPaidLeaveBalance =
                           leaveAccrual.phase === "probation" || leaveAccrual.requestableDays <= 0;
-                        const isAnnual = exceptionType === "annual_leave";
+                        const isPaidFromAnnualBalance =
+                          exceptionType === "annual_leave" || exceptionType === "emergency_leave";
                         return (
                           <div className="space-y-2.5 rounded-xl border border-sky-200 bg-sky-50/50 p-3.5 text-xs dark:border-sky-900/60 dark:bg-sky-950/25">
                             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-200/70 pb-2 dark:border-sky-800/60">
@@ -2981,14 +3180,14 @@ export default function DashboardApp() {
                               </p>
                             )}
 
-                            {isAnnual && (
+                            {isPaidFromAnnualBalance && (
                               leaveAccrual.phase === "probation" ? (
                                 <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-xs text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200 space-y-2">
                                   <p className="font-bold">
-                                    🚫 لا يمكنك إرسال طلب إجازة سنوية حالياً (رصيدك المتاح للطلب: ٠ يوم)
+                                    🚫 لا يمكنك إرسال طلب {exceptionType === "emergency_leave" ? "إجازة عارضة" : "إجازة سنوية"} حالياً (رصيدك المتاح للطلب: ٠ يوم)
                                   </p>
                                   <p>
-                                    أنت حاليًا في <strong>فترة الاختبار (حتى {leaveAccrual.probationEndsOn})</strong> — رصيد الإجازات السنوية يفتح بعد إتمام أول ٦ شهور. يمكنك طلب <strong>إجازة بدون مرتب</strong> الآن:
+                                    أنت حاليًا في <strong>فترة الاختبار (حتى {leaveAccrual.probationEndsOn})</strong> — رصيد الإجازات السنوية والعارضة يفتح بعد إتمام أول ٦ شهور. يمكنك طلب <strong>إجازة بدون مرتب</strong> الآن:
                                   </p>
                                   <button
                                     type="button"
@@ -3001,7 +3200,7 @@ export default function DashboardApp() {
                               ) : noPaidLeaveBalance ? (
                                 <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-xs text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200 space-y-2">
                                   <p className="font-bold">
-                                    🚫 لا يمكنك إرسال طلب إجازة سنوية — رصيدك المتاح حالياً هو ٠ يوم
+                                    🚫 لا يمكنك إرسال طلب {exceptionType === "emergency_leave" ? "إجازة عارضة" : "إجازة سنوية"} — رصيدك المتاح حالياً هو ٠ يوم
                                   </p>
                                   <p>
                                     لقد استنفدت كامل رصيد إجازاتك السنوية المستحق حتى الآن ({toArabicDigits(leaveAccrual.accruedDays + leaveAccrual.totalCarryOverDays)} يوم مستحق، تم استخدام/حجز {toArabicDigits(leaveAccrual.usedDays)} يوم). يمكنك التبديل إلى طلب إجازة بدون مرتب:
@@ -3017,7 +3216,7 @@ export default function DashboardApp() {
                               ) : !leaveVerdict.ok ? (
                                 <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-xs text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200 space-y-2">
                                   <p>
-                                    ❌ <b>لا يمكن طلب {toArabicDigits(leaveDays)} يوم إجازة سنوية:</b> {leaveVerdict.reasonAr}
+                                    ❌ <b>لا يمكن طلب {toArabicDigits(leaveDays)} يوم:</b> {leaveVerdict.reasonAr}
                                   </p>
                                   {leaveAccrual.requestableDays > 0 && leaveDays > leaveAccrual.requestableDays && (
                                     <button
@@ -3046,8 +3245,10 @@ export default function DashboardApp() {
                       })()}
 
                       {(() => {
+                        const isPaidLeaveType =
+                          exceptionType === "annual_leave" || exceptionType === "emergency_leave";
                         const disableAnnualInputs =
-                          exceptionType === "annual_leave" &&
+                          isPaidLeaveType &&
                           (leaveAccrual.phase === "probation" || leaveAccrual.requestableDays <= 0);
                         return (
                           <>
@@ -3101,7 +3302,7 @@ export default function DashboardApp() {
                               <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1">
                                 <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300" htmlFor="leaveDays">
                                   عدد أيام الإجازة (بمضاعفات نصف يوم)
-                                  {exceptionType === "annual_leave"
+                                  {isPaidLeaveType
                                     ? ` — الحد الأقصى المتاح لك: ${toArabicDigits(leaveAccrual.requestableDays)} يوم *`
                                     : " *"}
                                 </label>
@@ -3110,7 +3311,7 @@ export default function DashboardApp() {
                                     {[0.5, 1]
                                       .filter(
                                         (dVal) =>
-                                          exceptionType !== "annual_leave" || dVal <= leaveAccrual.requestableDays
+                                          !isPaidLeaveType || dVal <= leaveAccrual.requestableDays
                                       )
                                       .map((dVal) => (
                                         <button
@@ -3135,7 +3336,7 @@ export default function DashboardApp() {
                                 type="number"
                                 min={0.5}
                                 max={
-                                  exceptionType === "annual_leave" && leaveAccrual.requestableDays > 0
+                                  isPaidLeaveType && leaveAccrual.requestableDays > 0
                                     ? leaveAccrual.requestableDays
                                     : 30
                                 }
@@ -3220,35 +3421,50 @@ export default function DashboardApp() {
                       : null;
                     const blockedByPerm = isPerm && permCheck && !permCheck.ok;
 
-                    const isAnnualLeave = exceptionType === "annual_leave";
-                    const leaveCheck = isAnnualLeave
+                    const isPaidLeave =
+                      exceptionType === "annual_leave" || exceptionType === "emergency_leave";
+                    const leaveCheck = isPaidLeave
                       ? validateLeaveRequest(leaveAccrual, leaveDays)
                       : null;
                     const blockedByLeave =
-                      isAnnualLeave &&
+                      isPaidLeave &&
                       (leaveAccrual.phase === "probation" ||
                         leaveAccrual.requestableDays <= 0 ||
                         Boolean(leaveCheck && !leaveCheck.ok));
 
+                    const isAdv = exceptionType === "advance_request";
+                    const monthlySal = Number(profile.expectedSalary) || 0;
+                    const blockedByAdv =
+                      isAdv &&
+                      monthlySal > 0 &&
+                      cycleAdvances + pendingCycleAdvances + advanceAmount > monthlySal;
+
                     return (
                       <button
                         type="submit"
-                        disabled={exceptionSubmitting || Boolean(blockedByPerm) || Boolean(blockedByLeave)}
+                        disabled={
+                          exceptionSubmitting ||
+                          Boolean(blockedByPerm) ||
+                          Boolean(blockedByLeave) ||
+                          Boolean(blockedByAdv)
+                        }
                         className="brutal-btn w-full disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {exceptionSubmitting
                           ? "Sending…"
                           : blockedByPerm
-                            ? "لا يمكن إرسال طلب الإذن (راجع السبب أعلاه)"
+                            ? "🚫 لا يمكن إرسال طلب الإذن (راجع السبب والرصيد أعلاه)"
                             : blockedByLeave
                               ? leaveAccrual.requestableDays <= 0 || leaveAccrual.phase === "probation"
-                                ? `🚫 لا يمكن إرسال طلب إجازة سنوية (رصيدك المتاح: ٠ يوم)`
+                                ? `🚫 لا يمكن إرسال الطلب (رصيد إجازاتك المتاح: ٠ يوم)`
                                 : `🚫 المطلوب (${toArabicDigits(leaveDays)} يوم) يتجاوز رصيدك المتاح (${toArabicDigits(leaveAccrual.requestableDays)} يوم)`
-                              : isPerm
-                                ? `إرسال طلب الإذن (${permCheck?.chargedMinutes ?? 30} دقيقة) لموافقة الأدمن`
-                                : isAnnualLeave
-                                  ? `إرسال طلب إجازة سنوية (${toArabicDigits(leaveDays)} يوم من رصيدك: ${toArabicDigits(leaveAccrual.requestableDays)} يوم)`
-                                  : "Send request to HR"}
+                              : blockedByAdv
+                                ? "🚫 مبلغ السلفة يتجاوز المتبقي من راتبك المسجل"
+                                : isPerm
+                                  ? `إرسال طلب الإذن (${permCheck?.chargedMinutes ?? 30} دقيقة من رصيد الأذونات) لموافقة الأدمن`
+                                  : isPaidLeave
+                                    ? `إرسال طلب الإجازة (${toArabicDigits(leaveDays)} يوم من رصيدك: ${toArabicDigits(leaveAccrual.requestableDays)} يوم)`
+                                    : "Send request to HR"}
                       </button>
                     );
                   })()}

@@ -74,6 +74,7 @@ export default function PermissionLeaveCard({
   onRequestLeave,
   onRequestUnpaidLeave,
   onRequestAdvanceLate,
+  onRequestEarlyPermission,
   onRequestOvertime,
   onOpenExpenses,
 }: {
@@ -96,6 +97,7 @@ export default function PermissionLeaveCard({
   onRequestLeave?: () => void;
   onRequestUnpaidLeave?: () => void;
   onRequestAdvanceLate?: () => void;
+  onRequestEarlyPermission?: () => void;
   onRequestOvertime?: () => void;
   onOpenExpenses?: () => void;
 }) {
@@ -107,6 +109,7 @@ export default function PermissionLeaveCard({
   const remainingCount = Math.max(0, cfg.permissionMaxCount - usage.count);
   const remainingMinutes = Math.max(0, cfg.permissionMaxMinutes - usage.minutes);
   const minPermCheck = validatePermissionRequest(cfg.permissionMinMinutes, usage, cfg);
+  const canBookPermission = minPermCheck.ok;
   const effectiveHireDate = hireDate || ymd(now);
   const acc: LeaveAccrualResult = computeLeaveAccrual(
     effectiveHireDate,
@@ -160,7 +163,7 @@ export default function PermissionLeaveCard({
       </div>
 
       {/* 1-Click Quick HR Actions Bar */}
-      {(onRequestLeave || onRequestUnpaidLeave || onRequestAdvanceLate || onRequestOvertime || onOpenExpenses) && (
+      {(onRequestLeave || onRequestUnpaidLeave || onRequestAdvanceLate || onRequestEarlyPermission || onRequestOvertime || onOpenExpenses) && (
         <div className="flex flex-wrap items-center gap-2 border-b border-zinc-100 bg-zinc-50/70 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-900/50">
           <span className="text-[11px] font-bold text-zinc-500 me-1">
             {t("إجراءات سريعة:", "Quick Actions:")}
@@ -168,10 +171,45 @@ export default function PermissionLeaveCard({
           {onRequestAdvanceLate && (
             <button
               type="button"
-              onClick={onRequestAdvanceLate}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-violet-300 bg-violet-50 px-3 py-1.5 text-xs font-bold text-violet-800 hover:bg-violet-100 dark:border-violet-800 dark:bg-violet-950/50 dark:text-violet-300 cursor-pointer"
+              disabled={!canBookPermission}
+              onClick={() => {
+                if (canBookPermission) onRequestAdvanceLate();
+              }}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-bold transition-all ${
+                canBookPermission
+                  ? "border-violet-300 bg-violet-50 text-violet-800 hover:bg-violet-100 dark:border-violet-800 dark:bg-violet-950/50 dark:text-violet-300 cursor-pointer"
+                  : "border-zinc-200 bg-zinc-100 text-zinc-400 opacity-75 cursor-not-allowed dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500"
+              }`}
             >
-              ⏰ {t("طلب إذن شهري (حسب الرصيد المتاح)", "Request Monthly Permission")}
+              {canBookPermission ? "⏰" : "🔒"}{" "}
+              {canBookPermission
+                ? t(
+                    `طلب إذن تأخير (المتبقي: ${fmt(remainingCount)} أذونات / ${fmt(remainingMinutes)} د)`,
+                    `Request Late Permission (${remainingCount} left / ${remainingMinutes}m)`,
+                  )
+                : t("إذن تأخير غير متاح (نفد رصيد الأذونات)", "Late Permission Unavailable (0 quota)")}
+            </button>
+          )}
+          {onRequestEarlyPermission && (
+            <button
+              type="button"
+              disabled={!canBookPermission}
+              onClick={() => {
+                if (canBookPermission) onRequestEarlyPermission();
+              }}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-bold transition-all ${
+                canBookPermission
+                  ? "border-indigo-300 bg-indigo-50 text-indigo-800 hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950/50 dark:text-indigo-300 cursor-pointer"
+                  : "border-zinc-200 bg-zinc-100 text-zinc-400 opacity-75 cursor-not-allowed dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-500"
+              }`}
+            >
+              {canBookPermission ? "🚪" : "🔒"}{" "}
+              {canBookPermission
+                ? t(
+                    `طلب إذن انصراف مبكر (المتبقي: ${fmt(remainingCount)} أذونات / ${fmt(remainingMinutes)} د)`,
+                    `Request Early Leave Permission (${remainingCount} left / ${remainingMinutes}m)`,
+                  )
+                : t("إذن انصراف مبكر غير متاح (نفد رصيد الأذونات)", "Early Permission Unavailable (0 quota)")}
             </button>
           )}
           {onRequestUnpaidLeave && (
@@ -236,13 +274,13 @@ export default function PermissionLeaveCard({
         {/* Left: Permissions Quota & Ledger */}
         <div className="space-y-4">
           <Meter
-            label={t("عدد الأذونات المعتمدة المستخدمة", "Approved Permissions Used (Count)")}
+            label={t("عدد الأذونات المستخدمة / المحجوزة", "Permissions Used / Booked (Count)")}
             used={usage.count}
             max={cfg.permissionMaxCount}
             isAr={isAr}
           />
           <Meter
-            label={t("دقائق الأذونات المعتمدة المستخدمة", "Approved Permission Minutes Used")}
+            label={t("دقائق الأذونات المستخدمة / المحجوزة", "Permission Minutes Used / Booked")}
             used={usage.minutes}
             max={cfg.permissionMaxMinutes}
             isAr={isAr}
@@ -256,8 +294,8 @@ export default function PermissionLeaveCard({
               )}
             </b>
             {t(
-              `. الأذونات متاحة بدءاً من الشهر الأول (بما في ذلك أول 6 أشهر)، بحد أقصى ${fmt(cfg.permissionMaxCount)} أذونات و${fmt(cfg.permissionMaxMinutes)} دقيقة شهرياً. الإذن الواحد من ${fmt(cfg.permissionMinMinutes)} إلى ${fmt(cfg.permissionMaxSingleMinutes)} دقيقة (قاعدة الدقيقة الأولى: أي تأخير ولو دقيقة يُحتسب بحد أدنى 30 دقيقة)، ولا يُعتمد أي إذن إلا بعد موافقة الأدمن.`,
-              `. Available from Month 1 (including probation), max ${cfg.permissionMaxCount} permissions / ${cfg.permissionMaxMinutes} mins/month (${cfg.permissionMinMinutes}–${cfg.permissionMaxSingleMinutes} mins each). Requires Admin approval.`,
+              `. الأذونات (تأخير صباحي أو انصراف مبكر) متاحة بدءاً من الشهر الأول (بما في ذلك أول 6 أشهر)، بحد أقصى ${fmt(cfg.permissionMaxCount)} أذونات و${fmt(cfg.permissionMaxMinutes)} دقيقة شهرياً. الإذن الواحد من ${fmt(cfg.permissionMinMinutes)} إلى ${fmt(cfg.permissionMaxSingleMinutes)} دقيقة (قاعدة الدقيقة الأولى: أي تأخير ولو دقيقة يُحتسب بحد أدنى 30 دقيقة).`,
+              `. Permissions (late arrival or early leave) are available from Month 1 (including probation), max ${cfg.permissionMaxCount} permissions / ${cfg.permissionMaxMinutes} mins/month (${cfg.permissionMinMinutes}–${cfg.permissionMaxSingleMinutes} mins each).`,
             )}
           </p>
 
@@ -288,7 +326,7 @@ export default function PermissionLeaveCard({
 
           <div>
             <p className="mb-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
-              {t("سجل أذونات هذه الدورة", "Current Cycle Permission Log")}
+              {t("سجل أذونات هذه الدورة (تأخير وانصراف مبكر)", "Current Cycle Permission Log (Late & Early)")}
             </p>
             {ledger.length === 0 ? (
               <p className="text-[11px] text-zinc-400">
@@ -310,10 +348,10 @@ export default function PermissionLeaveCard({
                     </span>
                     <span className="flex-1 text-zinc-800 dark:text-zinc-200">
                       {e.kind === "late"
-                        ? t("تأخير صباحي", "Late Arrival")
+                        ? t("⏰ إذن تأخير صباحي", "⏰ Late Permission")
                         : e.kind === "early_leave"
-                        ? t("انصراف مبكر", "Early Leave")
-                        : t("إذن", "Permission")}{" "}
+                        ? t("🚪 إذن انصراف مبكر", "🚪 Early Leave Permission")
+                        : t("⏱️ إذن شهري", "⏱️ Permission")}{" "}
                       · {fmt(e.actualMinutes)} {t("د", "m")}
                     </span>
                     {e.status === "reversed" ? (
@@ -325,9 +363,13 @@ export default function PermissionLeaveCard({
                         <span className="rounded-full bg-emerald-100 px-2 py-0.5 font-bold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
                           {t("استثناء معتمد (بدون خصم)", "Excused (0m)")}
                         </span>
+                      ) : e.requestStatus === "pending" ? (
+                        <span className="rounded-full bg-indigo-100 px-2 py-0.5 font-bold text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300">
+                          −{fmt(e.chargedMinutes)} {t("د · ⏳ قيد مراجعة الأدمن", "m · ⏳ Pending Admin")}
+                        </span>
                       ) : (
                         <span className="rounded-full bg-amber-100 px-2 py-0.5 font-bold text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-                          −{fmt(e.chargedMinutes)} {t("د", "m")}
+                          −{fmt(e.chargedMinutes)} {t("د · ✓ معتمد", "m · ✓ Approved")}
                         </span>
                       )
                     ) : (
