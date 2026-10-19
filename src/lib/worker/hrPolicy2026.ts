@@ -126,8 +126,8 @@ export const POLICY_2026_SETTINGS_DEFAULTS: Required<
     | "invoiceTolerancePct"
   >
 > = {
-  policy2026Enabled: false,
-  policy2026EffectiveFrom: "2026-10-21",
+  policy2026Enabled: true,
+  policy2026EffectiveFrom: "2026-01-01",
   permissionMaxCount: POLICY_2026_DEFAULTS.permissionMaxCount,
   permissionMaxMinutes: POLICY_2026_DEFAULTS.permissionMaxMinutes,
   permissionMinMinutes: POLICY_2026_DEFAULTS.permissionMinMinutes,
@@ -182,8 +182,12 @@ export function policyConfigFromSettings(s: Policy2026SettingsFields | null | un
 
 /** True when HR-POL-2026 payroll maths apply to a given YYYY-MM-DD date. */
 export function isPolicy2026Active(s: Policy2026SettingsFields | null | undefined, dateYmd: string): boolean {
-  if (!s?.policy2026Enabled) return false;
-  const from = s.policy2026EffectiveFrom || POLICY_2026_SETTINGS_DEFAULTS.policy2026EffectiveFrom;
+  if (s?.policy2026Enabled === false) return false;
+  const rawFrom = s?.policy2026EffectiveFrom;
+  const from =
+    !rawFrom || rawFrom === "2026-10-21"
+      ? POLICY_2026_SETTINGS_DEFAULTS.policy2026EffectiveFrom
+      : rawFrom;
   return !!dateYmd && dateYmd >= from;
 }
 

@@ -41,13 +41,9 @@ import {
   initWorkSession,
   syncWorkSession,
   endWorkSession,
-  confirmPresenceCheckIn,
-  markSessionIdle,
   workedMs,
   type WorkSessionState,
 } from "@/lib/worker/session";
-import { loadTasksForWorker, type TaskRow } from "@/lib/worker/tasks";
-import ActiveCheckInModal from "./ActiveCheckInModal";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
 import TasksPanel from "./TasksPanel";
 import { DashboardSkeleton } from "./Skeleton";
@@ -115,8 +111,6 @@ type WorkerDoc = {
 };
 
 const SHIFT_MS = 8 * 60 * 60 * 1000;
-const CHECK_IN_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours routine check
-const CHECK_IN_WINDOW_SEC = 600; // 10 minutes confirmation window
 
 const ICON = {
   tasks: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4",
@@ -173,12 +167,16 @@ function exceptionLabel(ex: ExceptionRow): string {
   switch (ex.type) {
     case "late":
       return `Late arrival · ${mins}m`;
+    case "advance_late":
+      return `Advance Late Permission (إذن تأخير مسبق) · ${mins}m`;
     case "overtime":
       return `Overtime · +${mins}m`;
     case "absent":
       return "Absence (غياب)";
     case "annual_leave":
-      return "Annual Leave (إجازة سنوية)";
+      return `Annual Leave (إجازة سنوية · ${ex.leaveDays || 1}d)`;
+    case "unpaid_leave":
+      return `Unpaid Leave (إجازة بدون مرتب · ${ex.leaveDays || 1}d)`;
     case "sick_leave":
       return "Sick Leave (إجازة مرضية)";
     case "emergency_leave":
@@ -264,49 +262,40 @@ export default function DashboardApp() {
   const [smartLateIn, setSmartLateIn] = useState<{ clockIn: Date; overwrite?: boolean } | null>(null);
   const [smartBusy, setSmartBusy] = useState(false);
   const [leaveDays, setLeaveDays] = useState(1);
+  const [lateMinsInput, setLateMinsInput] = useState(30);
   const policyCfg = useMemo(() => policyConfigFromSettings(hrSettings), [hrSettings]);
   const policyActive = isPolicy2026Active(hrSettings, localYmd());
   const policyUsage = useMemo(() => usageFromLedger(ledger), [ledger]);
   const policyOffDay =
     (hrSettings.weekendDays || [5, 6]).includes(new Date().getDay()) || !!isDateHoliday(localYmd(), holidays);
   const policyRef = useRef<{ active: boolean; offDay: boolean; cfg: Policy2026Config; usage: CycleUsage }>({
-    active: false,
+    active: true,
     offDay: false,
     cfg: policyCfg,
     usage: policyUsage,
   });
   policyRef.current = { active: policyActive, offDay: policyOffDay, cfg: policyCfg, usage: policyUsage };
 
-  /** Required shift end if leaving now would be an early leave under HR-POL-2026, else null. */
+  /**
+   * Required shift end if leaving now would be an early leave OR if the worker
+   * clocked in late today under HR-POL-2026, so SmartClockOutModal always appears
+   * with Exception / Lateness Deduction / Permission options.
+   */
   const policyEarlyGate = useCallback((): Date | null => {
     const p = policyRef.current;
     const ws = sessionRef.current;
-    if (!p.active || p.offDay || !ws?.isActive) return null;
-    if (localYmd(ws.startTime) !== localYmd()) return null;
-    const end = requiredShiftEnd(ws.startTime, p.cfg);
-    return Date.now() < end.getTime() ? end : null;
+    if (!ws?.isActive) return null;
+    const stdMs = (p.cfg.standardHours || 8) * 3_600_000;
+    const worked = workedMs(ws);
+    const officialEnd = requiredShiftEnd(ws.startTime, p.cfg);
+    const dynamicEnd = new Date(Date.now() + Math.max(0, stdMs - worked));
+    const effectiveEnd =
+      dynamicEnd.getTime() > officialEnd.getTime() ? dynamicEnd : officialEnd;
+    const lateEv = evaluateClockIn(ws.startTime, p.usage, p.cfg);
+    const isEarly = Date.now() < effectiveEnd.getTime() || worked < stdMs - 60_000;
+    const isLate = lateEv.status !== "on-time";
+    return isEarly || isLate ? effectiveEnd : null;
   }, []);
-
-  // 2-Hour Routine Active Check-in
-  const [showCheckInModal, setShowCheckInModal] = useState(false);
-  const [checkInSecondsRemaining, setCheckInSecondsRemaining] = useState(CHECK_IN_WINDOW_SEC);
-  const [isCheckInIdle, setIsCheckInIdle] = useState(false);
-  const [checkInTasks, setCheckInTasks] = useState<TaskRow[]>([]);
-  const [lastCheckInTime, setLastCheckInTime] = useState<number>(() => {
-    if (typeof window !== "undefined") {
-      const stored = parseInt(sessionStorage.getItem("workerLastCheckInTime") || "0", 10);
-      return stored || Date.now();
-    }
-    return Date.now();
-  });
-  const checkInSecondsRef = useRef(CHECK_IN_WINDOW_SEC);
-  checkInSecondsRef.current = checkInSecondsRemaining;
-  const checkInIdleRef = useRef(false);
-  checkInIdleRef.current = isCheckInIdle;
-  const showCheckInModalRef = useRef(false);
-  showCheckInModalRef.current = showCheckInModal;
-  const lastCheckInRef = useRef(lastCheckInTime);
-  lastCheckInRef.current = lastCheckInTime;
 
   /** Tab is mirrored to `?tab=` so refreshes and shared links keep context. */
   const setTab = useCallback((next: Tab) => {
@@ -386,16 +375,6 @@ export default function DashboardApp() {
           email: data.email,
         });
         setSession(ws);
-        const storedCheckIn = parseInt(sessionStorage.getItem("workerLastCheckInTime") || "0", 10);
-        if (!storedCheckIn) {
-          const now = Date.now();
-          sessionStorage.setItem("workerLastCheckInTime", String(now));
-          setLastCheckInTime(now);
-          lastCheckInRef.current = now;
-        } else {
-          setLastCheckInTime(storedCheckIn);
-          lastCheckInRef.current = storedCheckIn;
-        }
       } else if (storedMode === "view-only") {
         setShiftMode("view-only");
         setSession(null);
@@ -447,10 +426,6 @@ export default function DashboardApp() {
       if (!ws) throw new Error("no session");
       sessionStorage.setItem("workerShiftMode", "clocked-in");
       sessionStorage.setItem("workerLoginTime", ws.startTime.toISOString());
-      const nowCheckIn = Date.now();
-      sessionStorage.setItem("workerLastCheckInTime", String(nowCheckIn));
-      setLastCheckInTime(nowCheckIn);
-      lastCheckInRef.current = nowCheckIn;
       setSession(ws);
       setShiftMode("clocked-in");
       setShowShiftChoiceModal(false);
@@ -487,13 +462,12 @@ export default function DashboardApp() {
 
   /**
    * Ends the running work segment but keeps the worker signed in (browse mode).
-   * Previously "Clock out" also signed the worker out of the portal.
    */
   const clockOut = useCallback(async (opts?: { silent?: boolean; reason?: string }) => {
     const fb = getFirebase();
     const ws = sessionRef.current;
     if (!opts?.silent) {
-      // HR-POL-2026: leaving before the required shift end → smart early-leave alert.
+      // HR-POL-2026: leaving before completing shift or with unresolved lateness → smart modal.
       const gateEnd = policyEarlyGate();
       if (gateEnd) {
         setSmartOut({ mode: "clockout", requiredEnd: gateEnd });
@@ -515,10 +489,6 @@ export default function DashboardApp() {
       sessionStorage.setItem("workerShiftMode", "view-only");
       sessionStorage.removeItem("workerLoginTime");
       sessionStorage.removeItem("workerLastCheckInTime");
-      setShowCheckInModal(false);
-      showCheckInModalRef.current = false;
-      setIsCheckInIdle(false);
-      checkInIdleRef.current = false;
       setSession(banked);
       setShiftMode("view-only");
       setShiftCompletedModalOpen(false);
@@ -599,26 +569,61 @@ export default function DashboardApp() {
       }
       const fb = getFirebase();
       const ws = sessionRef.current;
-      if ((choice === "permission" || choice === "deduct") && ev.isEarly && fb && uid && ws) {
+
+      if (choice === "excuse") {
+        setSmartOut(null);
+        await clockOut({ silent: true, reason: "تم تسجيل الانصراف — أرسل طلب الاستثناء الآن" });
+        setExceptionType("late");
+        setTab("exceptions");
+        toast.info("تم فتح نموذج طلب استثناء (Exception)", {
+          description: "اكتب سبب التأخير أو الانصراف المبكر لإرساله إلى الموارد البشرية.",
+          duration: 8000,
+        });
+        return;
+      }
+
+      if ((choice === "permission" || choice === "deduct") && fb && uid && ws) {
         setSmartBusy(true);
         try {
           const range = getPayrollCycleRange(ws.startTime, hrSettings.monthStartDay);
-          await chargeEarlyLeave(
-            fb.db,
-            {
-              uid,
-              name: `${profile?.firstName ?? ""} ${profile?.lastName ?? ""}`.trim() || (profile?.email ?? "Worker"),
-              email: profile?.email,
-            },
-            localYmd(ws.startTime),
-            range.startYmd,
-            ev,
-            choice === "permission",
-            formatHm(minutesOfDay(ctx.requiredEnd)),
-          );
+          const wName = `${profile?.firstName ?? ""} ${profile?.lastName ?? ""}`.trim() || (profile?.email ?? "Worker");
+          const dateYmd = localYmd(ws.startTime);
+
+          if (ev.isEarly) {
+            await chargeEarlyLeave(
+              fb.db,
+              { uid, name: wName, email: profile?.email },
+              dateYmd,
+              range.startYmd,
+              ev,
+              choice === "permission" && ev.canUsePermission,
+              formatHm(minutesOfDay(ctx.requiredEnd)),
+            );
+          }
+
+          // Also record late arrival decision if the worker clocked in late today and hasn't recorded it yet
+          const hasLateEntry = ledger.some((e) => e.date === dateYmd && e.kind === "late" && e.status === "applied");
+          if (!hasLateEntry) {
+            const lateEv = evaluateClockIn(ws.startTime, policyRef.current.usage, policyRef.current.cfg);
+            if (lateEv.status !== "on-time") {
+              const penaltyDays: 0.25 | 0.5 = lateEv.fallbackPenaltyDays === 0.5 ? 0.5 : 0.25;
+              await chargeLatePermission(
+                fb.db,
+                { uid, name: wName, email: profile?.email },
+                dateYmd,
+                range.startYmd,
+                lateEv,
+                {
+                  usePermission: choice === "permission" && !ev.isEarly && lateEv.covered,
+                  penaltyDays,
+                  overwrite: true,
+                },
+              ).catch(() => {});
+            }
+          }
         } catch (e) {
           console.error("early leave ledger failed", e);
-          toast.error("تعذر تسجيل الإذن", { description: "تحقق من الاتصال وحاول مرة أخرى." });
+          toast.error("تعذر تسجيل الاختيار", { description: "تحقق من الاتصال وحاول مرة أخرى." });
           setSmartBusy(false);
           return;
         }
@@ -627,16 +632,16 @@ export default function DashboardApp() {
       setSmartOut(null);
       const reason =
         choice === "permission"
-          ? "تم الانصراف بإذن انصراف مبكر"
+          ? "تم الانصراف مع استخدام إذن من الرصيد الشهري ✓"
           : choice === "deduct"
-            ? "تم الانصراف — سيُخصم الوقت المتبقي من الراتب"
+            ? "تم الانصراف وتطبيق خصم التأخير / عدم استكمال الساعات 💸"
             : choice === "break"
               ? "Break started — clock back in when you return"
               : undefined;
       if (ctx.mode === "logout") void handleLogout({ silent: true });
       else void clockOut({ silent: true, reason });
     },
-    [smartOut, uid, profile, hrSettings.monthStartDay, handleLogout, clockOut],
+    [smartOut, uid, profile, hrSettings.monthStartDay, ledger, handleLogout, clockOut, setTab],
   );
 
   /** Resolves the HR-POL-2026 smart late clock-in choice (use permission vs. salary deduction). */
@@ -789,64 +794,6 @@ export default function DashboardApp() {
         }
       }
 
-      // 2-hour Routine Active Presence Check-in
-      const checkInNow = Date.now();
-      const timeSinceLastCheck = checkInNow - lastCheckInRef.current;
-      if (timeSinceLastCheck >= CHECK_IN_INTERVAL_MS && !showCheckInModalRef.current) {
-        showCheckInModalRef.current = true;
-        setShowCheckInModal(true);
-        setIsCheckInIdle(false);
-        checkInIdleRef.current = false;
-        setCheckInSecondsRemaining(CHECK_IN_WINDOW_SEC);
-        checkInSecondsRef.current = CHECK_IN_WINDOW_SEC;
-        playTerminalBeep({ force: true });
-        void showBackgroundNotification({
-          title: "2-Hour Presence Check-In Required ⚡",
-          body: "Confirm your active status within 10 minutes to avoid being marked Idle.",
-          tab: "time",
-          urgent: true,
-        });
-        if (fb && uid) {
-          loadTasksForWorker(fb.db, uid).then(setCheckInTasks).catch(() => {});
-          void sendWebPushToWorkers(fb.db, {
-            recipientUids: [uid],
-            title: "2-Hour Presence Check-In Required ⚡",
-            body: "Confirm your active status within 10 minutes to avoid being marked Idle.",
-            tab: "time",
-            urgent: true,
-          });
-        }
-      }
-
-      // Check-in countdown window
-      if (showCheckInModalRef.current && !checkInIdleRef.current) {
-        if (checkInSecondsRef.current > 1) {
-          const nextSec = checkInSecondsRef.current - (reducedMotion ? 5 : 1);
-          const clamped = Math.max(0, nextSec);
-          checkInSecondsRef.current = clamped;
-          setCheckInSecondsRemaining(clamped);
-          if (clamped <= 0) {
-            setIsCheckInIdle(true);
-            checkInIdleRef.current = true;
-            playTerminalBeep({ force: true });
-            if (fb && ws?.id && uid) {
-              markSessionIdle(fb.db, ws.id, uid).catch(() => {});
-            }
-            toast.warning("Active check-in window expired", {
-              description: "Station marked as Idle in management records. Click modal to resume active status.",
-              duration: 8000,
-            });
-          }
-        } else {
-          setIsCheckInIdle(true);
-          checkInIdleRef.current = true;
-          playTerminalBeep({ force: true });
-          if (fb && ws?.id && uid) {
-            markSessionIdle(fb.db, ws.id, uid).catch(() => {});
-          }
-        }
-      }
-
       // 8-hour / allowed limit reached!
       if (elapsedMs >= allowedMs && !shiftCompletedModalOpen) {
         playTerminalBeep();
@@ -871,57 +818,6 @@ export default function DashboardApp() {
     }, tickMs);
     return () => window.clearInterval(id);
   }, [uid, shiftMode, overtimeMinutes, shiftCompletedModalOpen, reducedMotion]);
-
-  const handleConfirmCheckIn = useCallback(
-    async (data: { taskId?: string; taskTitle?: string; note?: string }) => {
-      const fb = getFirebase();
-      const ws = sessionRef.current;
-      if (!fb || !ws?.id || !uid) return;
-
-      try {
-        const workerName = profile ? `${profile.firstName ?? ""} ${profile.lastName ?? ""}`.trim() : "";
-        await confirmPresenceCheckIn(fb.db, ws.id, uid, {
-          taskId: data.taskId,
-          taskTitle: data.taskTitle,
-          note: data.note,
-          workerName,
-        });
-
-        const now = Date.now();
-        sessionStorage.setItem("workerLastCheckInTime", String(now));
-        setLastCheckInTime(now);
-        lastCheckInRef.current = now;
-        setShowCheckInModal(false);
-        showCheckInModalRef.current = false;
-        setIsCheckInIdle(false);
-        checkInIdleRef.current = false;
-        setCheckInSecondsRemaining(CHECK_IN_WINDOW_SEC);
-        checkInSecondsRef.current = CHECK_IN_WINDOW_SEC;
-
-        playTerminalBeep();
-        toast.success("Active presence verified!", {
-          description: "Status confirmed active. Next check-in in 2 hours.",
-        });
-      } catch (e) {
-        console.error("Check-in failed", e);
-        toast.error("Couldn't save check-in. Please try again.");
-        throw e;
-      }
-    },
-    [uid, profile],
-  );
-
-  const triggerManualCheckIn = useCallback(() => {
-    if (shiftMode !== "clocked-in") return;
-    const fb = getFirebase();
-    if (fb && uid) {
-      loadTasksForWorker(fb.db, uid).then(setCheckInTasks).catch(() => {});
-    }
-    setCheckInSecondsRemaining(CHECK_IN_WINDOW_SEC);
-    checkInSecondsRef.current = CHECK_IN_WINDOW_SEC;
-    setShowCheckInModal(true);
-    showCheckInModalRef.current = true;
-  }, [shiftMode, uid]);
 
   /** Best-effort save when the tab is hidden or closed so hours aren't lost. */
   useEffect(() => {
@@ -1452,8 +1348,8 @@ export default function DashboardApp() {
     const reason = String(fd.get("exceptionReason") ?? "").trim();
     const supportingEvidence = String(fd.get("supportingEvidence") ?? "").trim() || null;
 
-    if (type === "late" && (!lateMinutes || lateMinutes < 15 || lateMinutes > 180)) {
-      toast.warning("For late arrival, enter minutes between 15 and 180.");
+    if ((type === "late" || type === "advance_late") && (!lateMinutes || lateMinutes < 15 || lateMinutes > 180)) {
+      toast.warning("يرجى إدخال دقائق التأخير بين 15 و 180 دقيقة (15–180 mins).");
       return;
     }
     if (type === "overtime" && (!lateMinutes || lateMinutes < 15 || lateMinutes > 360)) {
@@ -1466,6 +1362,12 @@ export default function DashboardApp() {
     }
     const leaveDaysRaw = fd.get("leaveDays");
     const leaveDaysVal = leaveDaysRaw ? parseFloat(String(leaveDaysRaw)) : null;
+    if (type === "unpaid_leave") {
+      if (!leaveDaysVal || leaveDaysVal < 0.5 || leaveDaysVal > 30) {
+        toast.warning("يرجى تحديد عدد أيام الإجازة بدون مرتب (من نصف يوم إلى 30 يومًا).");
+        return;
+      }
+    }
     if (type === "annual_leave" && policyRef.current.active) {
       // HR-POL-2026: no annual leave during probation, no negative balance, 0.5-day steps.
       const hire = profile.hireDate || (profile.createdAt?.toDate ? localYmd(profile.createdAt.toDate()) : null);
@@ -1486,7 +1388,10 @@ export default function DashboardApp() {
         );
         const verdict = validateLeaveRequest(acc, leaveDaysVal || 0);
         if (!verdict.ok) {
-          toast.warning("لا يمكن تقديم طلب الإجازة", { description: verdict.reasonAr, duration: 9000 });
+          toast.warning("لا يمكن تقديم طلب الإجازة السنوية المدفوعة", {
+            description: `${verdict.reasonAr} — يمكنك اختيار «إجازة بدون مرتب (Unpaid Leave)» المتاحة خلال أول ٦ شهور.`,
+            duration: 9000,
+          });
           return;
         }
       }
@@ -1505,10 +1410,17 @@ export default function DashboardApp() {
         type,
         lateMinutes,
         exceptionDate,
-        reason: type === "advance_request" ? `[Salary Advance $${requestedAmount}]: ${reason}` : reason,
+        reason:
+          type === "advance_request"
+            ? `[Salary Advance $${requestedAmount}]: ${reason}`
+            : type === "advance_late"
+              ? `[إذن تأخير مسبق ليوم ${exceptionDate} (${lateMinutes} دقيقة)]: ${reason}`
+              : type === "unpaid_leave"
+                ? `[إجازة بدون مرتب (${leaveDaysVal || 1} يوم)]: ${reason}`
+                : reason,
         supportingEvidence,
         requestedAmount: type === "advance_request" ? requestedAmount : null,
-        leaveDays: type === "annual_leave" ? leaveDaysVal || 1 : null,
+        leaveDays: type === "annual_leave" || type === "unpaid_leave" ? leaveDaysVal || 1 : null,
       });
 
       const extendsToday = type === "overtime" && !!lateMinutes && exceptionDate === localYmd();
@@ -1523,6 +1435,7 @@ export default function DashboardApp() {
       setExceptionType("late");
       setAdvanceAmount(500);
       setLeaveDays(1);
+      setLateMinsInput(30);
       const dateEl = form.elements.namedItem("exceptionDate") as HTMLInputElement | null;
       if (dateEl) dateEl.value = localYmd();
       toast.success(
@@ -1530,6 +1443,10 @@ export default function DashboardApp() {
           ? "Overtime requested"
           : type === "advance_request"
           ? "Advance request sent"
+          : type === "advance_late"
+          ? "تم إرسال طلب إذن التأخير المسبق ✓"
+          : type === "unpaid_leave"
+          ? "تم إرسال طلب الإجازة بدون مرتب ✓"
           : "Request sent to HR",
         {
           description: extendsToday
@@ -1674,28 +1591,6 @@ export default function DashboardApp() {
                   <span className="block h-full rounded-full bg-emerald-500 transition-all duration-700" style={{ width: `${shiftPct}%` }} />
                 </span>
               </button>
-
-              <button
-                type="button"
-                onClick={triggerManualCheckIn}
-                title="2-Hour Routine Activity Check — Click to confirm presence or update active task"
-                className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-mono font-bold border transition-colors cursor-pointer ${
-                  isCheckInIdle
-                    ? "bg-red-50 text-red-700 border-red-300 dark:bg-red-950/60 dark:text-red-400 dark:border-red-900 animate-pulse"
-                    : showCheckInModal
-                    ? "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/60 dark:text-amber-400 dark:border-amber-900 animate-bounce"
-                    : "bg-zinc-100 text-zinc-700 border-zinc-200 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-700"
-                }`}
-              >
-                <span className={`h-2 w-2 rounded-full ${isCheckInIdle ? "bg-red-600 animate-ping" : showCheckInModal ? "bg-amber-500 animate-ping" : "bg-emerald-500"}`} />
-                <span>
-                  {isCheckInIdle
-                    ? "⚠️ Idle — Check-in Overdue"
-                    : showCheckInModal
-                    ? `⏱️ Due: ${Math.floor(checkInSecondsRemaining / 60)}:${String(checkInSecondsRemaining % 60).padStart(2, "0")}`
-                    : `⏱️ 2h Check: in ${Math.max(1, Math.ceil((CHECK_IN_INTERVAL_MS - (Date.now() - lastCheckInTime)) / 60000))}m`}
-                </span>
-              </button>
             </div>
           ) : (
             <div className="hidden md:flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50/90 py-1 pl-3 pr-1 dark:border-amber-900/60 dark:bg-amber-950/40">
@@ -1728,31 +1623,14 @@ export default function DashboardApp() {
               </button>
             )}
             {onShift && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setTab("time")}
-                  className="md:hidden inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 font-mono text-xs font-bold tabular-nums text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300 cursor-pointer"
-                >
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  {formatHM(durationMs)}
-                </button>
-                <button
-                  type="button"
-                  onClick={triggerManualCheckIn}
-                  title="2-Hour Presence Check"
-                  className={`md:hidden inline-flex items-center gap-1 rounded-lg px-2 py-1.5 font-mono text-[10px] font-bold border cursor-pointer ${
-                    isCheckInIdle
-                      ? "bg-red-50 text-red-700 border-red-300 animate-pulse"
-                      : showCheckInModal
-                      ? "bg-amber-50 text-amber-700 border-amber-300 animate-bounce"
-                      : "bg-zinc-100 text-zinc-700 border-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-700"
-                  }`}
-                >
-                  <span className={`h-1.5 w-1.5 rounded-full ${isCheckInIdle ? "bg-red-600 animate-ping" : showCheckInModal ? "bg-amber-500" : "bg-emerald-500"}`} />
-                  {isCheckInIdle ? "Idle!" : showCheckInModal ? "Due" : "2h"}
-                </button>
-              </>
+              <button
+                type="button"
+                onClick={() => setTab("time")}
+                className="md:hidden inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 font-mono text-xs font-bold tabular-nums text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300 cursor-pointer"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                {formatHM(durationMs)}
+              </button>
             )}
 
             {/* Theme switcher */}
@@ -1991,12 +1869,32 @@ export default function DashboardApp() {
                 <button
                   type="button"
                   onClick={() => {
+                    setExceptionType("advance_late");
+                    setTab("exceptions");
+                  }}
+                  className="rounded-xl border border-violet-300 bg-violet-50 px-3 py-1.5 text-xs font-bold text-violet-800 hover:bg-violet-100 dark:border-violet-800 dark:bg-violet-950/50 dark:text-violet-300 cursor-pointer"
+                >
+                  ⏰ إذن تأخير مسبق / Advance Late
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExceptionType("unpaid_leave");
+                    setTab("exceptions");
+                  }}
+                  className="rounded-xl border border-teal-300 bg-teal-50 px-3 py-1.5 text-xs font-bold text-teal-800 hover:bg-teal-100 dark:border-teal-800 dark:bg-teal-950/50 dark:text-teal-300 cursor-pointer"
+                >
+                  📅 إجازة بدون مرتب / Unpaid Leave
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
                     setExceptionType("annual_leave");
                     setTab("exceptions");
                   }}
                   className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300 cursor-pointer"
                 >
-                  🌴 طلب إجازة / Leave
+                  🌴 طلب إجازة سنوية / Leave
                 </button>
                 <button
                   type="button"
@@ -2311,6 +2209,14 @@ export default function DashboardApp() {
                 setExceptionType("annual_leave");
                 setTab("exceptions");
               }}
+              onRequestUnpaidLeave={() => {
+                setExceptionType("unpaid_leave");
+                setTab("exceptions");
+              }}
+              onRequestAdvanceLate={() => {
+                setExceptionType("advance_late");
+                setTab("exceptions");
+              }}
               onRequestOvertime={() => {
                 setExceptionType("overtime");
                 setTab("exceptions");
@@ -2426,8 +2332,10 @@ export default function DashboardApp() {
         {tab === "exceptions" && (
           <section className="space-y-6 animate-fade-in" aria-labelledby="ex-head">
             <div>
-              <h2 id="ex-head" className="text-xl font-bold text-zinc-900 dark:text-white">Requests</h2>
-              <p className="text-xs text-zinc-500">Let HR know about late arrivals, absences, or overtime ahead of time to avoid unexcused penalties. You&apos;ll be notified here when a request is reviewed.</p>
+              <h2 id="ex-head" className="text-xl font-bold text-zinc-900 dark:text-white">Requests &amp; Permissions (الطلبات والأذونات)</h2>
+              <p className="text-xs text-zinc-500">
+                Submit advance late permissions for a specific day, unpaid leave (available during your first 6 months), annual leave, overtime, or late arrival excuses.
+              </p>
             </div>
 
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -2442,10 +2350,12 @@ export default function DashboardApp() {
                     <input type="hidden" id="exceptionType" name="exceptionType" value={exceptionType} />
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2" role="radiogroup" aria-label="Request type">
                       {([
-                        ["late", "Late Arrival (تأخير)", ICON.time],
-                        ["absent", "Unexcused Absence (غياب)", ICON.exceptions],
+                        ["advance_late", "Advance Late (إذن تأخير مسبق)", ICON.time],
+                        ["unpaid_leave", "Unpaid Leave (إجازة بدون مرتب · أول ٦ شهور)", ICON.calendar],
+                        ["late", "Late Excuse (استثناء تأخير)", ICON.time],
+                        ["absent", "Absence Excuse (عذر غياب)", ICON.exceptions],
                         ["overtime", "Overtime (إضافي)", ICON.bolt],
-                        ["annual_leave", "Annual Leave (سنوية)", ICON.calendar],
+                        ["annual_leave", "Annual Leave (إجازة سنوية)", ICON.calendar],
                         ["sick_leave", "Sick Leave (مرضية)", ICON.shield],
                         ["emergency_leave", "Emergency (عارضة)", ICON.sparkles],
                         ["advance_request", "Salary Advance (سلفة)", ICON.cash],
@@ -2469,11 +2379,34 @@ export default function DashboardApp() {
                     </div>
                   </div>
 
-                  {exceptionType === "late" && (
-                    <div>
+                  {(exceptionType === "late" || exceptionType === "advance_late") && (
+                    <div className="space-y-2.5">
+                      {exceptionType === "advance_late" && (
+                        <div className="rounded-xl border border-violet-300 bg-violet-50/80 p-3.5 text-xs text-violet-900 dark:border-violet-800 dark:bg-violet-950/30 dark:text-violet-200" dir="rtl">
+                          ⏰ <strong>طلب إذن مسبق بالتأخير في يوم معين:</strong> حدد التاريخ الذي ستتأخر فيه من حقل التاريخ بالأسفل ومدة التأخير المتوقعة والسبب، ليتم تسجيل الإذن مسبقًا وعدم تطبيق خصم تأخير في ذلك اليوم.
+                        </div>
+                      )}
                       <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="lateMinutes">
-                        Estimated Minutes Late (15–180) *
+                        {exceptionType === "advance_late"
+                          ? "Expected Late Minutes on Target Day (مدة التأخير المتوقعة بالدقائق 15–180) *"
+                          : "Estimated Minutes Late (دقائق التأخير 15–180) *"}
                       </label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {[30, 60, 90, 120].map((m) => (
+                          <button
+                            key={m}
+                            type="button"
+                            onClick={() => setLateMinsInput(m)}
+                            className={`rounded-lg border px-3 py-1 text-xs font-bold transition-all cursor-pointer ${
+                              lateMinsInput === m
+                                ? "border-red-600 bg-red-600 text-white"
+                                : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                            }`}
+                          >
+                            {m} min ({m} د)
+                          </button>
+                        ))}
+                      </div>
                       <input
                         id="lateMinutes"
                         name="lateMinutes"
@@ -2481,7 +2414,8 @@ export default function DashboardApp() {
                         min={15}
                         max={180}
                         step={5}
-                        defaultValue={30}
+                        value={lateMinsInput}
+                        onChange={(e) => setLateMinsInput(Number(e.target.value) || 30)}
                         required
                         className="brutal-input"
                       />
@@ -2548,10 +2482,31 @@ export default function DashboardApp() {
                     </div>
                   )}
 
-                  {exceptionType === "annual_leave" && (
-                    <div dir="rtl">
+                  {(exceptionType === "annual_leave" || exceptionType === "unpaid_leave") && (
+                    <div dir="rtl" className="space-y-2.5">
+                      {exceptionType === "unpaid_leave" && (
+                        <div className="rounded-xl border border-teal-300 bg-teal-50/80 p-3.5 text-xs text-teal-900 dark:border-teal-800 dark:bg-teal-950/30 dark:text-teal-200">
+                          ✅ <strong>إجازة بدون مرتب (متاحة خلال أول ٦ شهور وبعدها):</strong> يمكنك طلب إجازة بدون مرتب في أي وقت حتى خلال فترة الاختبار (أول ٦ شهور). عند الموافقة عليها تُحسب إجازة رسمية بدون مرتب ولا يُطبق عليك جزاء الغياب بدون إذن.
+                        </div>
+                      )}
+                      {exceptionType === "annual_leave" && leaveAccrual?.phase === "probation" && (
+                        <div className="rounded-xl border border-amber-300 bg-amber-50 p-3.5 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200 space-y-2">
+                          <p>
+                            ⚠️ أنت حاليًا في <strong>أول ٦ شهور (فترة الاختبار حتى {leaveAccrual.probationEndsOn})</strong> — الإجازة السنوية المدفوعة تفتح بعد ٦ شهور، ولكن يمكنك طلب <strong>إجازة بدون مرتب</strong> بشكل طبيعي الآن:
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => setExceptionType("unpaid_leave")}
+                            className="rounded-lg bg-teal-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-teal-500 cursor-pointer"
+                          >
+                            📅 التبديل إلى طلب إجازة بدون مرتب (Unpaid Leave)
+                          </button>
+                        </div>
+                      )}
                       <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="leaveDays">
-                        عدد أيام الإجازة (بمضاعفات نصف يوم) *
+                        {exceptionType === "unpaid_leave"
+                          ? "عدد أيام الإجازة بدون مرتب (بمضاعفات نصف يوم) *"
+                          : "عدد أيام الإجازة السنوية (بمضاعفات نصف يوم) *"}
                       </label>
                       <input
                         id="leaveDays"
@@ -2565,19 +2520,25 @@ export default function DashboardApp() {
                         required
                         className="brutal-input"
                       />
-                      <p className="mt-1 text-[11px] text-zinc-500">يبدأ من «التاريخ الفعلي» أدناه. يتم التحقق من رصيدك وفق لائحة HR-POL-2026 (لا إجازة سنوية خلال فترة الاختبار).</p>
+                      <p className="mt-1 text-[11px] text-zinc-500">
+                        {exceptionType === "unpaid_leave"
+                          ? "متاحة خلال أول ٦ شهور وبعدها · تبدأ من التاريخ المحدد أدناه."
+                          : "يبدأ من «التاريخ الفعلي» أدناه. يتم التحقق من رصيدك وفق لائحة HR-POL-2026."}
+                      </p>
                     </div>
                   )}
 
-                  {["annual_leave", "sick_leave", "emergency_leave"].includes(exceptionType) && (
+                  {["annual_leave", "unpaid_leave", "sick_leave", "emergency_leave"].includes(exceptionType) && (
                     <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-3.5 text-xs text-blue-900 dark:border-blue-900/40 dark:bg-blue-950/30 dark:text-blue-300">
-                      ℹ️ <strong>Official Leave Request:</strong> Submitting this request allows HR to excuse your absence on this date without deducting penalty multipliers from your payroll.
+                      ℹ️ <strong>Official Leave Request:</strong> Submitting this request allows HR to excuse your absence on this date without deducting unexcused absence penalty multipliers from your payroll.
                     </div>
                   )}
 
                   <div>
                     <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="exceptionDate">
-                      Effective Date *
+                      {exceptionType === "advance_late"
+                        ? "Target Date for Late Arrival (اليوم المحدد للتأخير) *"
+                        : "Effective Date (التاريخ) *"}
                     </label>
                     <input
                       id="exceptionDate"
@@ -2598,7 +2559,13 @@ export default function DashboardApp() {
                       name="exceptionReason"
                       required
                       rows={3}
-                      placeholder="Explain the reason for this exception request…"
+                      placeholder={
+                        exceptionType === "advance_late"
+                          ? "اكتب سبب التأخير المسبق والموعد المتوقع لوصولك في ذلك اليوم…"
+                          : exceptionType === "unpaid_leave"
+                            ? "اكتب سبب طلب الإجازة بدون مرتب…"
+                            : "Explain the reason for this exception request…"
+                      }
                       className="brutal-input resize-none"
                     />
                   </div>
@@ -3225,10 +3192,13 @@ export default function DashboardApp() {
         </div>
       )}
 
-      {/* HR-POL-2026 smart early clock-out alert */}
+      {/* HR-POL-2026 smart early clock-out & lateness alert */}
       {smartOut && (
         <SmartClockOutModal
           requiredEnd={smartOut.requiredEnd}
+          firstClockIn={firstClockIn ?? undefined}
+          workedSoFarMs={durationMs}
+          lateCovered={Boolean(todayLateEntry?.covered)}
           usage={policyUsage}
           cfg={policyCfg}
           hourlyRate={hrSettings.defaultHourlyRate || 31.25}
@@ -3251,16 +3221,6 @@ export default function DashboardApp() {
           onClose={smartLateIn.overwrite ? () => setSmartLateIn(null) : undefined}
         />
       )}
-
-      {/* Active Presence Check-in Modal (Every 2 Hours) */}
-      <ActiveCheckInModal
-        isOpen={showCheckInModal}
-        workerName={profile?.firstName ? `${profile.firstName} ${profile.lastName ?? ""}`.trim() : ""}
-        tasks={checkInTasks}
-        secondsRemaining={checkInSecondsRemaining}
-        isIdle={isCheckInIdle}
-        onConfirm={handleConfirmCheckIn}
-      />
 
       {/* ── Mobile Bottom Navigation Bar ── */}
       <nav

@@ -73,6 +73,8 @@ export default function PermissionLeaveCard({
   carriedOver,
   cycleLabel,
   onRequestLeave,
+  onRequestUnpaidLeave,
+  onRequestAdvanceLate,
   onRequestOvertime,
   onOpenExpenses,
 }: {
@@ -92,6 +94,8 @@ export default function PermissionLeaveCard({
   carriedOver: number;
   cycleLabel: string;
   onRequestLeave?: () => void;
+  onRequestUnpaidLeave?: () => void;
+  onRequestAdvanceLate?: () => void;
   onRequestOvertime?: () => void;
   onOpenExpenses?: () => void;
 }) {
@@ -155,11 +159,29 @@ export default function PermissionLeaveCard({
       </div>
 
       {/* 1-Click Quick HR Actions Bar */}
-      {(onRequestLeave || onRequestOvertime || onOpenExpenses) && (
+      {(onRequestLeave || onRequestUnpaidLeave || onRequestAdvanceLate || onRequestOvertime || onOpenExpenses) && (
         <div className="flex flex-wrap items-center gap-2 border-b border-zinc-100 bg-zinc-50/70 px-5 py-3 dark:border-zinc-800 dark:bg-zinc-900/50">
           <span className="text-[11px] font-bold text-zinc-500 me-1">
             {t("إجراءات سريعة:", "Quick Actions:")}
           </span>
+          {onRequestAdvanceLate && (
+            <button
+              type="button"
+              onClick={onRequestAdvanceLate}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-violet-300 bg-violet-50 px-3 py-1.5 text-xs font-bold text-violet-800 hover:bg-violet-100 dark:border-violet-800 dark:bg-violet-950/50 dark:text-violet-300 cursor-pointer"
+            >
+              ⏰ {t("طلب إذن تأخير مسبق ليوم معين", "Advance Late Permission")}
+            </button>
+          )}
+          {onRequestUnpaidLeave && (
+            <button
+              type="button"
+              onClick={onRequestUnpaidLeave}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-teal-300 bg-teal-50 px-3 py-1.5 text-xs font-bold text-teal-800 hover:bg-teal-100 dark:border-teal-800 dark:bg-teal-950/50 dark:text-teal-300 cursor-pointer"
+            >
+              📅 {t("طلب إجازة بدون مرتب (متاحة أول ٦ شهور)", "Request Unpaid Leave")}
+            </button>
+          )}
           {onRequestLeave && (
             <button
               type="button"
@@ -333,6 +355,15 @@ export default function PermissionLeaveCard({
                     + {t("طلب إجازة", "Book Leave")}
                   </button>
                 )}
+                {onRequestUnpaidLeave && acc.phase === "probation" && (
+                  <button
+                    type="button"
+                    onClick={onRequestUnpaidLeave}
+                    className="rounded-lg bg-teal-600 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-teal-500 cursor-pointer"
+                  >
+                    + {t("طلب إجازة بدون مرتب", "Request Unpaid Leave")}
+                  </button>
+                )}
               </div>
               <div className="grid grid-cols-3 gap-2 text-center text-[11px]">
                 <div className="rounded-lg bg-zinc-50 p-2 dark:bg-zinc-800/60">
@@ -357,8 +388,8 @@ export default function PermissionLeaveCard({
               <p className="text-[11px] leading-5 text-zinc-500">
                 {acc.phase === "probation"
                   ? t(
-                      `فترة الاختبار تنتهي ${fmt(acc.probationEndsOn)} — لا يحق طلب إجازة سنوية قبلها (الأذونات الشهرية متاحة).`,
-                      `Probation ends on ${acc.probationEndsOn} — annual leave unlocks after probation (monthly permissions are active now).`,
+                      `فترة الاختبار تنتهي ${fmt(acc.probationEndsOn)} — يمكنك طلب إجازة بدون مرتب (Unpaid Leave) خلال أول ٦ شهور بشكل طبيعي، بينما الإجازة السنوية المدفوعة تفتح بعد انتهاء فترة الاختبار.`,
+                      `Probation ends on ${acc.probationEndsOn} — you can request Unpaid Leave during the first 6 months normally; paid annual leave unlocks after probation.`,
                     )
                   : acc.phase === "year1"
                   ? t(

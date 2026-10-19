@@ -184,22 +184,6 @@ export async function endWorkSession(db: Firestore, session: WorkSessionState): 
     totalWorkTime,
     completedAt: serverTimestamp(),
   });
-  const hoursLogged = (totalWorkTime / (1000 * 60 * 60)).toFixed(1);
-  const wName = session.workerName || "Team Member";
-  import("./adminNotifications")
-    .then(({ notifyAdmins }) =>
-      notifyAdmins(db, {
-        targetRoles: ["super_admin", "hr_admin"],
-        category: "hr",
-        eventType: "worker_clock_out",
-        title: `⏹️ Shift Ended: ${wName}`,
-        body: `${wName} clocked out (${hoursLogged}h logged today).`,
-        href: "/admin/work-sessions",
-        actorUid: session.workerId,
-        actorName: wName,
-      }),
-    )
-    .catch(() => {});
   return { ...session, priorMs: totalWorkTime, segmentStart: logoutTime, isActive: false };
 }
 

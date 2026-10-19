@@ -76,13 +76,26 @@ export async function submitException(
     createdAt: serverTimestamp(),
   });
 
+  const labelMap: Record<string, string> = {
+    advance_late: "Advance Late Permission (إذن تأخير مسبق)",
+    unpaid_leave: "Unpaid Leave (إجازة بدون مرتب)",
+    annual_leave: "Annual Leave (إجازة سنوية)",
+    late: "Late Arrival Excuse (استثناء تأخير)",
+    absent: "Absence Excuse (عذر غياب)",
+    overtime: "Overtime (عمل إضافي)",
+    sick_leave: "Sick Leave (إجازة مرضية)",
+    emergency_leave: "Emergency Leave (إجازة عارضة)",
+    advance_request: "Salary Advance (سلفة)",
+  };
+  const label = labelMap[payload.type] || payload.type.replace(/_/g, " ");
+
   import("./adminNotifications")
     .then(({ notifyAdmins }) =>
       notifyAdmins(db, {
         targetRoles: ["super_admin", "hr_admin"],
         category: "hr",
         eventType: "exception_submitted",
-        title: `📋 New ${payload.type.replace(/_/g, " ")} Request`,
+        title: `📋 New Request: ${label}`,
         body: `${payload.workerName} (${payload.exceptionDate}): ${payload.reason.slice(0, 80)}`,
         href: "/admin/exceptions",
         actorUid: payload.workerId,
