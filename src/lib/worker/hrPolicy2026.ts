@@ -299,12 +299,13 @@ export interface CycleUsage {
 
 export const EMPTY_USAGE: CycleUsage = { count: 0, minutes: 0 };
 
-/** Quota consumed by applied + covered ledger entries. */
+/** Quota consumed by applied + covered ledger entries (admin-approved 0m excuses do not consume quota). */
 export function usageFromLedger(entries: PermissionLedgerEntry[]): CycleUsage {
   let count = 0;
   let minutes = 0;
   for (const e of entries) {
     if (e.status !== "applied" || !e.covered) continue;
+    if ((e.chargedMinutes || 0) <= 0) continue;
     count += 1;
     minutes += e.chargedMinutes || 0;
   }

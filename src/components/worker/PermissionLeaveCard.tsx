@@ -296,9 +296,15 @@ export default function PermissionLeaveCard({
                         {t("ملغى", "Reversed")}
                       </span>
                     ) : e.covered ? (
-                      <span className="rounded-full bg-amber-100 px-2 py-0.5 font-bold text-amber-800 dark:bg-amber-950 dark:text-amber-300">
-                        −{fmt(e.chargedMinutes)} {t("د", "m")}
-                      </span>
+                      (e.chargedMinutes || 0) === 0 ? (
+                        <span className="rounded-full bg-emerald-100 px-2 py-0.5 font-bold text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                          {t("استثناء معتمد (بدون خصم)", "Excused (0m)")}
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-amber-100 px-2 py-0.5 font-bold text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+                          −{fmt(e.chargedMinutes)} {t("د", "m")}
+                        </span>
+                      )
                     ) : (
                       <span className="rounded-full bg-red-100 px-2 py-0.5 font-bold text-red-700 dark:bg-red-950 dark:text-red-300">
                         {t("خصم غير مغطى", "Uncovered")}

@@ -307,7 +307,7 @@ export default function DashboardApp() {
   const policyEarlyGate = useCallback((): Date | null => {
     const p = policyRef.current;
     const ws = sessionRef.current;
-    if (!ws?.isActive) return null;
+    if (!ws?.isActive || p.offDay) return null;
     const stdMs = (p.cfg.standardHours || 8) * 3_600_000;
     const worked = workedMs(ws);
     const officialEnd = requiredShiftEnd(ws.startTime, p.cfg);
