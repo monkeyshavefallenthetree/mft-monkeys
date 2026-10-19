@@ -36,6 +36,7 @@ export default function SmartClockOutModal({
   firstClockIn,
   workedSoFarMs,
   lateCovered,
+  dailyUsedMinutes = 0,
   usage,
   cfg,
   hourlyRate,
@@ -47,6 +48,7 @@ export default function SmartClockOutModal({
   firstClockIn?: Date;
   workedSoFarMs?: number;
   lateCovered?: boolean;
+  dailyUsedMinutes?: number;
   usage: CycleUsage;
   cfg: Policy2026Config;
   hourlyRate: number;
@@ -88,8 +90,13 @@ export default function SmartClockOutModal({
   const targetMinsForPerm = ev.isEarly
     ? ev.remainingMinutes
     : lateEv?.lateMinutes || 30;
-  const permValidation = validatePermissionRequest(targetMinsForPerm, usage, cfg);
-  const canRequestPerm = ev.isEarly ? ev.canUsePermission : Boolean(lateEv?.covered);
+  const permValidation = validatePermissionRequest(
+    targetMinsForPerm,
+    usage,
+    cfg,
+    ev.isEarly ? { dailyUsedMinutes } : undefined,
+  );
+  const canRequestPerm = permValidation.ok && (ev.isEarly ? ev.canUsePermission : Boolean(lateEv?.covered));
 
   const secsLeft = Math.max(
     0,

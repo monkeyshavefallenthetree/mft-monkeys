@@ -354,12 +354,22 @@ export function checkCoverage(
   return { covered: true };
 }
 
+export interface DailyPermissionContext {
+  /** Charged minutes already used/booked on the same calendar day (`YYYY-MM-DD`). */
+  dailyUsedMinutes?: number;
+  /** Number of permissions already used/booked on the same calendar day. */
+  dailyUsedCount?: number;
+  /** True if a permission of the exact same kind (late or early_leave) is already booked on that day. */
+  sameKindAlreadyBooked?: boolean;
+}
+
 export interface PermissionRequestVerdict {
   ok: boolean;
   requestedMinutes: number;
   chargedMinutes: number;
   remainingCount: number;
   remainingMinutes: number;
+  remainingDailyMinutes: number;
   allowedDurations: number[];
   reasonCode: UncoveredReason | "below_min" | null;
   reasonAr: string;
@@ -369,19 +379,28 @@ export interface PermissionRequestVerdict {
  * Validates a worker's request for a monthly permission:
  * - Eligible for all employees starting from Month 1 (including first 6 months).
  * - Monthly cap: 4 permissions max, 4 hours (240 minutes) max per month.
- * - Single permission duration: min 30 minutes, max 120 minutes (2 hours).
+ * - Single permission & daily cap: min 30 minutes, max 120 minutes (2 hours) total per day.
  * - First-minute rule: any lateness >= 1 minute is rounded up to at least 30 minutes (and 15-min steps above 30).
  */
 export function validatePermissionRequest(
   requestedMinutes: number,
   usage: CycleUsage = EMPTY_USAGE,
   cfg: Policy2026Config = POLICY_2026_DEFAULTS,
+  dailyCtx?: DailyPermissionContext,
 ): PermissionRequestVerdict {
   const rem = remainingQuota(usage, cfg);
+  const dailyUsed = Math.max(0, dailyCtx?.dailyUsedMinutes ?? 0);
+  const remDaily = Math.max(0, cfg.permissionMaxSingleMinutes - dailyUsed);
   const presets = [30, 45, 60, 75, 90, 105, 120];
   const allowedDurations =
-    rem.count > 0
-      ? presets.filter((m) => m >= cfg.permissionMinMinutes && m <= cfg.permissionMaxSingleMinutes && m <= rem.minutes)
+    rem.count > 0 && !dailyCtx?.sameKindAlreadyBooked && remDaily >= cfg.permissionMinMinutes
+      ? presets.filter(
+          (m) =>
+            m >= cfg.permissionMinMinutes &&
+            m <= cfg.permissionMaxSingleMinutes &&
+            m <= rem.minutes &&
+            m <= remDaily,
+        )
       : [];
 
   if (rem.count <= 0) {
@@ -391,6 +410,7 @@ export function validatePermissionRequest(
       chargedMinutes: 0,
       remainingCount: rem.count,
       remainingMinutes: rem.minutes,
+      remainingDailyMinutes: remDaily,
       allowedDurations: [],
       reasonCode: "count_exhausted",
       reasonAr: `لا يمكنك طلب إذن جديد لأنك استهلكت الحد الأقصى الشهري لعدد الأذونات (${toArabicDigits(cfg.permissionMaxCount)} من ${toArabicDigits(cfg.permissionMaxCount)} أذونات مستخدمة هذا الشهر).`,
@@ -404,9 +424,38 @@ export function validatePermissionRequest(
       chargedMinutes: 0,
       remainingCount: rem.count,
       remainingMinutes: rem.minutes,
+      remainingDailyMinutes: remDaily,
       allowedDurations: [],
       reasonCode: "minutes_exhausted",
       reasonAr: `لا يمكنك طلب إذن جديد لأن الرصيد المتبقي لك من الساعات هذا الشهر (${toArabicDigits(rem.minutes)} دقيقة) أقل من الحد الأدنى للإذن الواحد (${toArabicDigits(cfg.permissionMinMinutes)} دقيقة من إجمالي ٤ ساعات شهريًا).`,
+    };
+  }
+
+  if (dailyCtx?.sameKindAlreadyBooked) {
+    return {
+      ok: false,
+      requestedMinutes,
+      chargedMinutes: 0,
+      remainingCount: rem.count,
+      remainingMinutes: rem.minutes,
+      remainingDailyMinutes: remDaily,
+      allowedDurations: [],
+      reasonCode: "over_single_cap",
+      reasonAr: `لديك بالفعل طلب إذن مسجل من نفس النوع في هذا اليوم (${toArabicDigits(dailyUsed)} دقيقة) — لا يمكن إرسال أكثر من إذن من نفس النوع في اليوم الواحد، ولا يجوز أن يتجاوز إجمالي الأذونات في اليوم الواحد ساعتين (${toArabicDigits(cfg.permissionMaxSingleMinutes)} دقيقة).`,
+    };
+  }
+
+  if (remDaily < cfg.permissionMinMinutes) {
+    return {
+      ok: false,
+      requestedMinutes,
+      chargedMinutes: 0,
+      remainingCount: rem.count,
+      remainingMinutes: rem.minutes,
+      remainingDailyMinutes: remDaily,
+      allowedDurations: [],
+      reasonCode: "over_single_cap",
+      reasonAr: `لا يمكنك طلب إذن إضافي في هذا اليوم لأن الحد الأقصى المسموح به للأذونات في اليوم الواحد هو ساعتان (${toArabicDigits(cfg.permissionMaxSingleMinutes)} دقيقة)، وقد استهلكت/حجزت بالفعل ${toArabicDigits(dailyUsed)} دقيقة في هذا اليوم.`,
     };
   }
 
@@ -417,6 +466,7 @@ export function validatePermissionRequest(
       chargedMinutes: 0,
       remainingCount: rem.count,
       remainingMinutes: rem.minutes,
+      remainingDailyMinutes: remDaily,
       allowedDurations,
       reasonCode: "below_min",
       reasonAr: `يرجى اختيار مدة الإذن المطلوبة (الحد الأدنى للإذن الواحد ${toArabicDigits(cfg.permissionMinMinutes)} دقيقة والحد الأقصى ساعتان).`,
@@ -432,9 +482,24 @@ export function validatePermissionRequest(
       chargedMinutes: charged,
       remainingCount: rem.count,
       remainingMinutes: rem.minutes,
+      remainingDailyMinutes: remDaily,
       allowedDurations,
       reasonCode: "over_single_cap",
       reasonAr: `لا يمكن قبول هذا الإذن لأن المدة المطلوبة (${toArabicDigits(requestedMinutes)} دقيقة) تتجاوز الحد الأقصى المسموح به للإذن الواحد وهو ساعتان (${toArabicDigits(cfg.permissionMaxSingleMinutes)} دقيقة).`,
+    };
+  }
+
+  if (dailyUsed + charged > cfg.permissionMaxSingleMinutes) {
+    return {
+      ok: false,
+      requestedMinutes,
+      chargedMinutes: charged,
+      remainingCount: rem.count,
+      remainingMinutes: rem.minutes,
+      remainingDailyMinutes: remDaily,
+      allowedDurations,
+      reasonCode: "over_single_cap",
+      reasonAr: `لا يمكن إرسال هذا الإذن لأن إجمالي الأذونات في اليوم الواحد لا يجوز أن يتجاوز ساعتين (${toArabicDigits(cfg.permissionMaxSingleMinutes)} دقيقة) — لديك بالفعل إذن في هذا اليوم بمدة ${toArabicDigits(dailyUsed)} دقيقة، وأقصى مدة متبقية مسموحة لك في هذا اليوم هي ${toArabicDigits(remDaily)} دقيقة فقط.`,
     };
   }
 
@@ -445,9 +510,10 @@ export function validatePermissionRequest(
       chargedMinutes: charged,
       remainingCount: rem.count,
       remainingMinutes: rem.minutes,
+      remainingDailyMinutes: remDaily,
       allowedDurations,
       reasonCode: "minutes_exhausted",
-      reasonAr: `لا يمكنك أخذ إذن بمدة ${toArabicDigits(charged)} دقيقة لأن المتبقي في رصيد ساعاتك الشهري هو ${toArabicDigits(rem.minutes)} دقيقة فقط (من أصل ${toArabicDigits(cfg.permissionMaxMinutes)} دقيقة / ٤ ساعات شهريًا). أقصى مدة يمكنك اختيارها الآن هي ${toArabicDigits(rem.minutes)} دقيقة.`,
+      reasonAr: `لا يمكنك أخذ إذن بمدة ${toArabicDigits(charged)} دقيقة لأن المتبقي في رصيد ساعاتك الشهري هو ${toArabicDigits(rem.minutes)} دقيقة فقط (من أصل ${toArabicDigits(cfg.permissionMaxMinutes)} دقيقة / ٤ ساعات شهريًا). أقصى مدة يمكنك اختيارها الآن هي ${toArabicDigits(Math.min(rem.minutes, remDaily))} دقيقة.`,
     };
   }
 
@@ -457,6 +523,7 @@ export function validatePermissionRequest(
     chargedMinutes: charged,
     remainingCount: rem.count,
     remainingMinutes: rem.minutes,
+    remainingDailyMinutes: remDaily,
     allowedDurations,
     reasonCode: null,
     reasonAr: "",

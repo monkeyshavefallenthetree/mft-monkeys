@@ -321,6 +321,7 @@ export default function DashboardApp() {
   const [leaveDays, setLeaveDays] = useState(1);
   const [leaveStartDate, setLeaveStartDate] = useState(() => localYmd());
   const [leaveEndDate, setLeaveEndDate] = useState(() => localYmd());
+  const [permTargetDate, setPermTargetDate] = useState(() => localYmd());
   const [lateMinsInput, setLateMinsInput] = useState(30);
   const policyCfg = useMemo(() => policyConfigFromSettings(hrSettings), [hrSettings]);
   const policyActive = isPolicy2026Active(hrSettings, localYmd());
@@ -382,6 +383,23 @@ export default function DashboardApp() {
     return out;
   }, [ledger, exceptions, uid, hrSettings.monthStartDay, policyCfg]);
   const policyUsage = useMemo(() => usageFromLedger(effectiveLedger), [effectiveLedger]);
+  const getDailyPermissionCtx = useCallback(
+    (dateYmd: string, reqType: string) => {
+      const targetDate = dateYmd || localYmd();
+      const entriesOnDate = effectiveLedger.filter(
+        (e) => e.date === targetDate && e.status === "applied" && e.covered && (e.chargedMinutes || 0) > 0,
+      );
+      const dailyUsedMinutes = entriesOnDate.reduce((sum, e) => sum + (e.chargedMinutes || 0), 0);
+      const targetKind = reqType === "early_permission" ? "early_leave" : "late";
+      const sameKindAlreadyBooked = entriesOnDate.some((e) => e.kind === targetKind);
+      return {
+        dailyUsedMinutes,
+        dailyUsedCount: entriesOnDate.length,
+        sameKindAlreadyBooked,
+      };
+    },
+    [effectiveLedger],
+  );
   const policyOffDay =
     (hrSettings.weekendDays || [5, 6]).includes(new Date().getDay()) || !!isDateHoliday(localYmd(), holidays);
   const policyRef = useRef<{ active: boolean; offDay: boolean; cfg: Policy2026Config; usage: CycleUsage }>({
@@ -1649,10 +1667,12 @@ export default function DashboardApp() {
     let effectiveMinutes = lateMinutes;
 
     if (isPermissionReq) {
+      const dailyCtx = getDailyPermissionCtx(exceptionDate, type);
       const permVerdict = validatePermissionRequest(
         lateMinutes ?? 0,
         policyRef.current.usage,
         policyRef.current.cfg,
+        dailyCtx,
       );
       if (!permVerdict.ok) {
         toast.error("لا يمكن تقديم طلب الإذن الشهري", {
@@ -2889,7 +2909,16 @@ export default function DashboardApp() {
 
                   {(exceptionType === "advance_late" || exceptionType === "early_permission") && (() => {
                     const permRem = remainingQuota(policyUsage, policyCfg);
-                    const permVerdict = validatePermissionRequest(lateMinsInput, policyUsage, policyCfg);
+                    const dailyCtx = getDailyPermissionCtx(permTargetDate, exceptionType);
+                    const permVerdict = validatePermissionRequest(lateMinsInput, policyUsage, policyCfg, dailyCtx);
+                    const maxAllowedNow = Math.max(
+                      1,
+                      Math.min(
+                        policyCfg.permissionMaxSingleMinutes,
+                        permVerdict.remainingDailyMinutes || policyCfg.permissionMaxSingleMinutes,
+                        permRem.minutes || policyCfg.permissionMaxSingleMinutes,
+                      ),
+                    );
                     const durationOptions: { mins: number; label: string }[] = [
                       { mins: 30, label: "30 د (نصف ساعة)" },
                       { mins: 45, label: "45 د" },
@@ -2910,9 +2939,20 @@ export default function DashboardApp() {
                               اختر مدة الإذن المطلوبة حسب رصيد أذوناتك المتاح (يتطلب موافقة الأدمن لاعتماده)
                             </p>
                           </div>
-                          <div className="rounded-xl bg-white px-3 py-1.5 text-[11px] font-bold text-indigo-900 shadow-sm dark:bg-zinc-900 dark:text-indigo-200">
-                            المتبقي: {toArabicDigits(permRem.count)} من {toArabicDigits(policyCfg.permissionMaxCount)} أذونات ·{" "}
-                            {toArabicDigits(permRem.minutes)} من {toArabicDigits(policyCfg.permissionMaxMinutes)} د
+                          <div className="flex flex-wrap gap-1.5">
+                            <div className="rounded-xl bg-white px-3 py-1.5 text-[11px] font-bold text-indigo-900 shadow-sm dark:bg-zinc-900 dark:text-indigo-200">
+                              المتبقي شهرياً: {toArabicDigits(permRem.count)} من {toArabicDigits(policyCfg.permissionMaxCount)} أذونات ·{" "}
+                              {toArabicDigits(permRem.minutes)} من {toArabicDigits(policyCfg.permissionMaxMinutes)} د
+                            </div>
+                            <div
+                              className={`rounded-xl px-3 py-1.5 text-[11px] font-bold shadow-sm ${
+                                permVerdict.remainingDailyMinutes > 0 && !dailyCtx.sameKindAlreadyBooked
+                                  ? "bg-white text-emerald-900 dark:bg-zinc-900 dark:text-emerald-300"
+                                  : "bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-300"
+                              }`}
+                            >
+                              المتاح في يوم {permTargetDate}: {toArabicDigits(permVerdict.remainingDailyMinutes)} من {toArabicDigits(policyCfg.permissionMaxSingleMinutes)} د
+                            </div>
                           </div>
                         </div>
 
@@ -2920,7 +2960,7 @@ export default function DashboardApp() {
                         <ul className="space-y-1 rounded-xl bg-white/80 p-3 text-[11px] leading-5 text-zinc-700 dark:bg-zinc-900/70 dark:text-zinc-300">
                           <li>• <b>أهلية التقديم:</b> الأذونات الشهرية متاحة لجميع الموظفين بشكل طبيعي بدءاً من الشهر الأول (بما في ذلك أول 6 أشهر).</li>
                           <li>• <b>الحد الأقصى الشهري:</b> 4 أذونات في الشهر فقط، بإجمالي لا يتجاوز 4 ساعات (240 دقيقة) شهرياً.</li>
-                          <li>• <b>المدد المسموح بها:</b> الحد الأدنى للإذن الواحد 30 دقيقة، والحد الأقصى ساعتان (120 دقيقة).</li>
+                          <li>• <b>الحد الأقصى اليومي وللإذن الواحد:</b> الحد الأدنى للإذن الواحد 30 دقيقة، والحد الأقصى ساعتان (120 دقيقة) كإجمالي في اليوم الواحد.</li>
                           <li>• <b>احتساب تأخير البصمة (قاعدة الدقيقة الأولى):</b> أي تأخير ولو بدقيقة واحدة (مثل 11:01 بدلاً من 11:00) يُحتسب بحد أدنى نصف ساعة (30 دقيقة) وتُخصم من رصيد الساعات المتاح.</li>
                           <li>• <b>موافقة الإدارة:</b> يُحجز الإذن من رصيدك فور إرساله، ويُعتمد رسمياً بعد موافقة الأدمن (إذا رُفض يعود الرصيد تلقائياً).</li>
                         </ul>
@@ -2928,12 +2968,13 @@ export default function DashboardApp() {
                         {/* Duration Picker Based on Available Balance */}
                         <div>
                           <label className="block text-xs font-bold text-zinc-800 dark:text-zinc-200 mb-1.5" htmlFor="lateMinutes">
-                            اختر مدة الإذن المطلوبة (حسب رصيدك المتاح: {toArabicDigits(permRem.minutes)} دقيقة) *
+                            اختر مدة الإذن المطلوبة (أقصى متاح لليوم: {toArabicDigits(Math.min(permRem.minutes, permVerdict.remainingDailyMinutes))} دقيقة) *
                           </label>
                           <div className="flex flex-wrap gap-1.5">
                             {durationOptions.map((opt) => {
-                              const allowed = permRem.count > 0 && opt.mins <= permRem.minutes;
+                              const allowed = permVerdict.allowedDurations.includes(opt.mins);
                               const active = lateMinsInput === opt.mins;
+                              const overDaily = opt.mins > permVerdict.remainingDailyMinutes;
                               return (
                                 <button
                                   key={opt.mins}
@@ -2949,7 +2990,14 @@ export default function DashboardApp() {
                                         : "border-red-200 bg-red-50/60 text-red-700 opacity-75 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
                                   }`}
                                 >
-                                  {opt.label} {!allowed ? " (يتجاوز الرصيد)" : ""}
+                                  {opt.label}{" "}
+                                  {!allowed
+                                    ? dailyCtx.sameKindAlreadyBooked
+                                      ? " (مسجل لهذا اليوم)"
+                                      : overDaily
+                                        ? " (يتجاوز ١٢٠ د باليوم)"
+                                        : " (يتجاوز الرصيد)"
+                                    : ""}
                                 </button>
                               );
                             })}
@@ -2960,7 +3008,7 @@ export default function DashboardApp() {
                               name="lateMinutes"
                               type="number"
                               min={1}
-                              max={240}
+                              max={maxAllowedNow}
                               step={1}
                               value={lateMinsInput}
                               onChange={(e) => setLateMinsInput(Number(e.target.value) || 0)}
@@ -2990,9 +3038,10 @@ export default function DashboardApp() {
                           </div>
                         ) : (
                           <div className="rounded-xl border border-emerald-300 bg-emerald-50/90 p-3 text-xs leading-5 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200">
-                            ✓ <b>متاح للطلب ({toArabicDigits(permVerdict.chargedMinutes)} دقيقة):</b> سيتم إرسال الطلب للأدمن للموافقة وحجزه من رصيدك، ويتبقى لك{" "}
+                            ✓ <b>متاح للطلب ({toArabicDigits(permVerdict.chargedMinutes)} دقيقة):</b> سيتم إرسال الطلب للأدمن للموافقة وحجزه من رصيدك، ويتبقى لك في هذا اليوم{" "}
+                            <b>{toArabicDigits(Math.max(0, permVerdict.remainingDailyMinutes - permVerdict.chargedMinutes))} دقيقة</b>، وفي الشهر{" "}
                             <b>{toArabicDigits(Math.max(0, permRem.count - 1))} أذونات</b> و{" "}
-                            <b>{toArabicDigits(Math.max(0, permRem.minutes - permVerdict.chargedMinutes))} دقيقة</b> هذا الشهر.
+                            <b>{toArabicDigits(Math.max(0, permRem.minutes - permVerdict.chargedMinutes))} دقيقة</b>.
                           </div>
                         )}
                       </div>
@@ -3373,7 +3422,8 @@ export default function DashboardApp() {
                         name="exceptionDate"
                         type="date"
                         required
-                        defaultValue={localYmd()}
+                        value={permTargetDate}
+                        onChange={(e) => setPermTargetDate(e.target.value || localYmd())}
                         className="brutal-input"
                       />
                     </div>
@@ -3417,7 +3467,12 @@ export default function DashboardApp() {
                   {(() => {
                     const isPerm = exceptionType === "advance_late" || exceptionType === "early_permission";
                     const permCheck = isPerm
-                      ? validatePermissionRequest(lateMinsInput, policyUsage, policyCfg)
+                      ? validatePermissionRequest(
+                          lateMinsInput,
+                          policyUsage,
+                          policyCfg,
+                          getDailyPermissionCtx(permTargetDate, exceptionType),
+                        )
                       : null;
                     const blockedByPerm = isPerm && permCheck && !permCheck.ok;
 
@@ -4182,6 +4237,7 @@ export default function DashboardApp() {
           firstClockIn={firstClockIn ?? undefined}
           workedSoFarMs={durationMs}
           lateCovered={Boolean(todayLateEntry?.covered)}
+          dailyUsedMinutes={getDailyPermissionCtx(localYmd(), "early_permission").dailyUsedMinutes}
           usage={policyUsage}
           cfg={policyCfg}
           hourlyRate={hrSettings.defaultHourlyRate || 31.25}
