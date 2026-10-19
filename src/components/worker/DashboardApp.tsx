@@ -179,6 +179,7 @@ function formatHM(ms: number): string {
 
 function exceptionLabel(ex: ExceptionRow): string {
   const mins = Number(ex.lateMinutes) || 0;
+  const days = Number(ex.leaveDays) || 1;
   switch (ex.type) {
     case "late":
       return `Late arrival · ${mins}m`;
@@ -189,18 +190,41 @@ function exceptionLabel(ex: ExceptionRow): string {
     case "absent":
       return "Absence (غياب)";
     case "annual_leave":
-      return `Annual Leave (إجازة سنوية · ${ex.leaveDays || 1}d)`;
+      return `Annual Leave (إجازة سنوية · ${days}d)`;
     case "unpaid_leave":
-      return `Unpaid Leave (إجازة بدون مرتب · ${ex.leaveDays || 1}d)`;
+      return `Unpaid Leave (إجازة بدون مرتب · ${days}d)`;
     case "sick_leave":
-      return "Sick Leave (إجازة مرضية)";
+      return `Sick Leave (إجازة مرضية · ${days}d)`;
     case "emergency_leave":
-      return "Emergency Leave (إجازة عارضة)";
+      return `Emergency Leave (إجازة عارضة · ${days}d)`;
     case "advance_request":
       return `Salary Advance ($${ex.requestedAmount ?? "—"})`;
     default:
       return String(ex.type || "Request");
   }
+}
+
+function calcInclusiveDays(startYmd: string, endYmd: string): number {
+  if (!startYmd || !endYmd) return 1;
+  const s = new Date(startYmd + "T12:00:00");
+  const e = new Date(endYmd + "T12:00:00");
+  if (isNaN(s.getTime()) || isNaN(e.getTime()) || e < s) return 1;
+  return Math.max(1, Math.round((e.getTime() - s.getTime()) / 86_400_000) + 1);
+}
+
+function addDaysYmd(startYmd: string, daysToAdd: number): string {
+  const d = new Date(startYmd + "T12:00:00");
+  if (isNaN(d.getTime())) return startYmd;
+  d.setDate(d.getDate() + Math.max(0, daysToAdd));
+  return localYmd(d);
+}
+
+function formatSubmittedDateTime(ts: unknown): string {
+  const d = toDate(ts as Timestamp | undefined);
+  if (!d) return "—";
+  const ymdStr = localYmd(d);
+  const timeStr = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return `${ymdStr} (${timeStr})`;
 }
 
 function alertBadgeClass(type: string | undefined): { cls: string; label: string } {
@@ -285,6 +309,8 @@ export default function DashboardApp() {
   const [smartLateIn, setSmartLateIn] = useState<{ clockIn: Date; overwrite?: boolean } | null>(null);
   const [smartBusy, setSmartBusy] = useState(false);
   const [leaveDays, setLeaveDays] = useState(1);
+  const [leaveStartDate, setLeaveStartDate] = useState(() => localYmd());
+  const [leaveEndDate, setLeaveEndDate] = useState(() => localYmd());
   const [lateMinsInput, setLateMinsInput] = useState(30);
   const policyCfg = useMemo(() => policyConfigFromSettings(hrSettings), [hrSettings]);
   const policyActive = isPolicy2026Active(hrSettings, localYmd());
@@ -1500,13 +1526,21 @@ export default function DashboardApp() {
     if (!fb || !uid || !profile) return;
     const fd = new FormData(form);
     const type = String(fd.get("exceptionType") ?? "");
+    const isLeave = ["annual_leave", "unpaid_leave", "sick_leave", "emergency_leave"].includes(type);
     const lateRaw = fd.get("lateMinutes");
     const lateMinutes = lateRaw ? parseInt(String(lateRaw), 10) : null;
     const requestedAmountRaw = fd.get("requestedAmount");
     const requestedAmount = requestedAmountRaw ? parseFloat(String(requestedAmountRaw)) : null;
     const exceptionDate = String(fd.get("exceptionDate") ?? "");
+    const endDateRaw = fd.get("endDate") ? String(fd.get("endDate")) : "";
+    const endDate = isLeave ? (endDateRaw || exceptionDate) : null;
     const reason = String(fd.get("exceptionReason") ?? "").trim();
     const supportingEvidence = String(fd.get("supportingEvidence") ?? "").trim() || null;
+
+    if (isLeave && endDate && endDate < exceptionDate) {
+      toast.warning("تاريخ نهاية الإجازة لا يمكن أن يكون قبل تاريخ البداية (End Date must be on or after Start Date).");
+      return;
+    }
 
     if ((type === "late" || type === "advance_late") && (!lateMinutes || lateMinutes < 15 || lateMinutes > 180)) {
       toast.warning("يرجى إدخال دقائق التأخير بين 15 و 180 دقيقة (15–180 mins).");
@@ -1521,10 +1555,11 @@ export default function DashboardApp() {
       return;
     }
     const leaveDaysRaw = fd.get("leaveDays");
-    const leaveDaysVal = leaveDaysRaw ? parseFloat(String(leaveDaysRaw)) : null;
-    if (type === "unpaid_leave") {
+    const computedRangeDays = isLeave ? calcInclusiveDays(exceptionDate, endDate || exceptionDate) : 1;
+    const leaveDaysVal = leaveDaysRaw ? parseFloat(String(leaveDaysRaw)) : computedRangeDays;
+    if (isLeave) {
       if (!leaveDaysVal || leaveDaysVal < 0.5 || leaveDaysVal > 30) {
-        toast.warning("يرجى تحديد عدد أيام الإجازة بدون مرتب (من نصف يوم إلى 30 يومًا).");
+        toast.warning("يرجى تحديد عدد أيام الإجازة بشكل صحيح (من نصف يوم إلى 30 يومًا).");
         return;
       }
     }
@@ -1549,7 +1584,7 @@ export default function DashboardApp() {
         const verdict = validateLeaveRequest(acc, leaveDaysVal || 0);
         if (!verdict.ok) {
           toast.warning("لا يمكن تقديم طلب الإجازة السنوية المدفوعة", {
-            description: `${verdict.reasonAr} — يمكنك اختيار «إجازة بدون مرتب (Unpaid Leave)» المتاحة خلال أول ٦ شهور.`,
+            description: `${verdict.reasonAr} — يمكنك اختيار «إجازة بدون مرتب (Unpaid Leave)».`,
             duration: 9000,
           });
           return;
@@ -1561,6 +1596,9 @@ export default function DashboardApp() {
       return;
     }
 
+    const dateRangeLabel =
+      isLeave && endDate && endDate !== exceptionDate ? `من ${exceptionDate} إلى ${endDate}` : `ليوم ${exceptionDate}`;
+
     setExceptionSubmitting(true);
     try {
       await submitException(fb.db, {
@@ -1570,17 +1608,20 @@ export default function DashboardApp() {
         type,
         lateMinutes,
         exceptionDate,
+        endDate,
         reason:
           type === "advance_request"
             ? `[Salary Advance $${requestedAmount}]: ${reason}`
             : type === "advance_late"
               ? `[إذن تأخير مسبق ليوم ${exceptionDate} (${lateMinutes} دقيقة)]: ${reason}`
               : type === "unpaid_leave"
-                ? `[إجازة بدون مرتب (${leaveDaysVal || 1} يوم)]: ${reason}`
-                : reason,
+                ? `[إجازة بدون مرتب ${dateRangeLabel} (${leaveDaysVal || 1} يوم)]: ${reason}`
+                : isLeave
+                  ? `[إجازة ${dateRangeLabel} (${leaveDaysVal || 1} يوم)]: ${reason}`
+                  : reason,
         supportingEvidence,
         requestedAmount: type === "advance_request" ? requestedAmount : null,
-        leaveDays: type === "annual_leave" || type === "unpaid_leave" ? leaveDaysVal || 1 : null,
+        leaveDays: isLeave ? leaveDaysVal || 1 : null,
       });
 
       const extendsToday = type === "overtime" && !!lateMinutes && exceptionDate === localYmd();
@@ -1595,6 +1636,8 @@ export default function DashboardApp() {
       setExceptionType("late");
       setAdvanceAmount(500);
       setLeaveDays(1);
+      setLeaveStartDate(localYmd());
+      setLeaveEndDate(localYmd());
       setLateMinsInput(30);
       const dateEl = form.elements.namedItem("exceptionDate") as HTMLInputElement | null;
       if (dateEl) dateEl.value = localYmd();
@@ -2542,7 +2585,7 @@ export default function DashboardApp() {
             <div>
               <h2 id="ex-head" className="text-xl font-bold text-zinc-900 dark:text-white">Requests &amp; Permissions (الطلبات والأذونات)</h2>
               <p className="text-xs text-zinc-500">
-                Submit advance late permissions for a specific day, unpaid leave (available during your first 6 months), annual leave, overtime, or late arrival excuses.
+                Submit advance late permissions for a specific day, unpaid leave, annual leave, overtime, or late arrival excuses.
               </p>
             </div>
 
@@ -2559,7 +2602,7 @@ export default function DashboardApp() {
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2" role="radiogroup" aria-label="Request type">
                       {([
                         ["advance_late", "Advance Late (إذن تأخير مسبق)", ICON.time],
-                        ["unpaid_leave", "Unpaid Leave (إجازة بدون مرتب · أول ٦ شهور)", ICON.calendar],
+                        ["unpaid_leave", "Unpaid Leave (إجازة بدون مرتب)", ICON.calendar],
                         ["late", "Late Excuse (استثناء تأخير)", ICON.time],
                         ["absent", "Absence Excuse (عذر غياب)", ICON.exceptions],
                         ["overtime", "Overtime (إضافي)", ICON.bolt],
@@ -2690,17 +2733,12 @@ export default function DashboardApp() {
                     </div>
                   )}
 
-                  {(exceptionType === "annual_leave" || exceptionType === "unpaid_leave") && (
-                    <div dir="rtl" className="space-y-2.5">
-                      {exceptionType === "unpaid_leave" && (
-                        <div className="rounded-xl border border-teal-300 bg-teal-50/80 p-3.5 text-xs text-teal-900 dark:border-teal-800 dark:bg-teal-950/30 dark:text-teal-200">
-                          ✅ <strong>إجازة بدون مرتب (متاحة خلال أول ٦ شهور وبعدها):</strong> يمكنك طلب إجازة بدون مرتب في أي وقت حتى خلال فترة الاختبار (أول ٦ شهور). عند الموافقة عليها تُحسب إجازة رسمية بدون مرتب ولا يُطبق عليك جزاء الغياب بدون إذن.
-                        </div>
-                      )}
+                  {["annual_leave", "unpaid_leave", "sick_leave", "emergency_leave"].includes(exceptionType) ? (
+                    <div dir="rtl" className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50/60 p-4 dark:border-zinc-800 dark:bg-zinc-900/50">
                       {exceptionType === "annual_leave" && leaveAccrual?.phase === "probation" && (
                         <div className="rounded-xl border border-amber-300 bg-amber-50 p-3.5 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200 space-y-2">
                           <p>
-                            ⚠️ أنت حاليًا في <strong>أول ٦ شهور (فترة الاختبار حتى {leaveAccrual.probationEndsOn})</strong> — الإجازة السنوية المدفوعة تفتح بعد ٦ شهور، ولكن يمكنك طلب <strong>إجازة بدون مرتب</strong> بشكل طبيعي الآن:
+                            ⚠️ أنت حاليًا في <strong>فترة الاختبار (حتى {leaveAccrual.probationEndsOn})</strong> — الإجازة السنوية المدفوعة تفتح بعد ٦ شهور، ويمكنك طلب <strong>إجازة بدون مرتب</strong> الآن:
                           </p>
                           <button
                             type="button"
@@ -2711,52 +2749,115 @@ export default function DashboardApp() {
                           </button>
                         </div>
                       )}
-                      <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="leaveDays">
-                        {exceptionType === "unpaid_leave"
-                          ? "عدد أيام الإجازة بدون مرتب (بمضاعفات نصف يوم) *"
-                          : "عدد أيام الإجازة السنوية (بمضاعفات نصف يوم) *"}
+
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div>
+                          <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="exceptionDate">
+                            📅 تاريخ بداية الإجازة (Start Date) *
+                          </label>
+                          <input
+                            id="exceptionDate"
+                            name="exceptionDate"
+                            type="date"
+                            required
+                            value={leaveStartDate}
+                            onChange={(e) => {
+                              const nextStart = e.target.value;
+                              setLeaveStartDate(nextStart);
+                              const nextEnd = !leaveEndDate || leaveEndDate < nextStart ? nextStart : leaveEndDate;
+                              setLeaveEndDate(nextEnd);
+                              setLeaveDays(calcInclusiveDays(nextStart, nextEnd));
+                            }}
+                            className="brutal-input"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="endDate">
+                            📅 تاريخ نهاية الإجازة (End Date) *
+                          </label>
+                          <input
+                            id="endDate"
+                            name="endDate"
+                            type="date"
+                            required
+                            min={leaveStartDate}
+                            value={leaveEndDate}
+                            onChange={(e) => {
+                              const nextEnd = e.target.value;
+                              setLeaveEndDate(nextEnd);
+                              if (nextEnd >= leaveStartDate) {
+                                setLeaveDays(calcInclusiveDays(leaveStartDate, nextEnd));
+                              }
+                            }}
+                            className="brutal-input"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300" htmlFor="leaveDays">
+                            عدد أيام الإجازة (بمضاعفات نصف يوم) *
+                          </label>
+                          {leaveStartDate === leaveEndDate && (
+                            <div className="flex gap-1.5">
+                              {[0.5, 1].map((dVal) => (
+                                <button
+                                  key={dVal}
+                                  type="button"
+                                  onClick={() => setLeaveDays(dVal)}
+                                  className={`rounded-md border px-2 py-0.5 text-[11px] font-bold cursor-pointer ${
+                                    leaveDays === dVal
+                                      ? "border-emerald-600 bg-emerald-600 text-white"
+                                      : "border-zinc-300 bg-white text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                                  }`}
+                                >
+                                  {dVal === 0.5 ? "نصف يوم (0.5)" : "يوم كامل (1)"}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <input
+                          id="leaveDays"
+                          name="leaveDays"
+                          type="number"
+                          min={0.5}
+                          max={30}
+                          step={0.5}
+                          value={leaveDays}
+                          onChange={(e) => {
+                            const val = Math.max(0.5, Number(e.target.value) || 1);
+                            setLeaveDays(val);
+                            if (val >= 1 && leaveStartDate) {
+                              setLeaveEndDate(addDaysYmd(leaveStartDate, Math.ceil(val) - 1));
+                            }
+                          }}
+                          required
+                          className="brutal-input"
+                        />
+                        <p className="mt-1 text-[11px] text-zinc-500">
+                          الفترة المختارة: من <strong className="font-mono">{leaveStartDate}</strong> إلى <strong className="font-mono">{leaveEndDate}</strong> ({leaveDays} يوم).
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="exceptionDate">
+                        {exceptionType === "advance_late"
+                          ? "Target Date for Late Arrival (اليوم المحدد للتأخير) *"
+                          : "Effective Date (التاريخ) *"}
                       </label>
                       <input
-                        id="leaveDays"
-                        name="leaveDays"
-                        type="number"
-                        min={0.5}
-                        max={30}
-                        step={0.5}
-                        value={leaveDays}
-                        onChange={(e) => setLeaveDays(Number(e.target.value) || 0)}
+                        id="exceptionDate"
+                        name="exceptionDate"
+                        type="date"
                         required
+                        defaultValue={localYmd()}
                         className="brutal-input"
                       />
-                      <p className="mt-1 text-[11px] text-zinc-500">
-                        {exceptionType === "unpaid_leave"
-                          ? "متاحة خلال أول ٦ شهور وبعدها · تبدأ من التاريخ المحدد أدناه."
-                          : "يبدأ من «التاريخ الفعلي» أدناه. يتم التحقق من رصيدك وفق لائحة HR-POL-2026."}
-                      </p>
                     </div>
                   )}
-
-                  {["annual_leave", "unpaid_leave", "sick_leave", "emergency_leave"].includes(exceptionType) && (
-                    <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-3.5 text-xs text-blue-900 dark:border-blue-900/40 dark:bg-blue-950/30 dark:text-blue-300">
-                      ℹ️ <strong>Official Leave Request:</strong> Submitting this request allows HR to excuse your absence on this date without deducting unexcused absence penalty multipliers from your payroll.
-                    </div>
-                  )}
-
-                  <div>
-                    <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="exceptionDate">
-                      {exceptionType === "advance_late"
-                        ? "Target Date for Late Arrival (اليوم المحدد للتأخير) *"
-                        : "Effective Date (التاريخ) *"}
-                    </label>
-                    <input
-                      id="exceptionDate"
-                      name="exceptionDate"
-                      type="date"
-                      required
-                      defaultValue={localYmd()}
-                      className="brutal-input"
-                    />
-                  </div>
 
                   <div>
                     <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="exceptionReason">
@@ -2827,46 +2928,57 @@ export default function DashboardApp() {
                   </div>
                 ) : (
                   <div className="space-y-3 max-h-[480px] overflow-y-auto pr-1">
-                    {exceptions.map((ex) => (
-                      <div key={ex.id} className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900">
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="text-xs font-bold text-zinc-900 dark:text-white uppercase tracking-wider">
-                              {exceptionLabel(ex)}
-                            </span>
-                            {Boolean(ex.requestedAmount) && (
-                              <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
-                                ${Number(ex.requestedAmount).toLocaleString()}
+                    {exceptions.map((ex) => {
+                      const isLeaveEx = ["annual_leave", "unpaid_leave", "sick_leave", "emergency_leave"].includes(String(ex.type ?? ""));
+                      const startStr = String(ex.exceptionDate ?? "—");
+                      const endStr = ex.endDate ? String(ex.endDate) : startStr;
+                      return (
+                        <div key={ex.id} className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-900">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-xs font-bold text-zinc-900 dark:text-white uppercase tracking-wider">
+                                {exceptionLabel(ex)}
                               </span>
-                            )}
+                              {Boolean(ex.requestedAmount) && (
+                                <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                                  ${Number(ex.requestedAmount).toLocaleString()}
+                                </span>
+                              )}
+                            </div>
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
+                                ex.status === "approved"
+                                  ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400"
+                                  : ex.status === "rejected"
+                                  ? "bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-400"
+                                  : "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-400"
+                              }`}
+                            >
+                              {ex.status === "approved" ? "Approved" : ex.status === "rejected" ? "Declined" : "Pending"}
+                            </span>
                           </div>
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
-                              ex.status === "approved"
-                                ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400"
-                                : ex.status === "rejected"
-                                ? "bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-400"
-                                : "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-400"
-                            }`}
-                          >
-                            {ex.status === "approved" ? "Approved" : ex.status === "rejected" ? "Declined" : "Pending"}
-                          </span>
-                        </div>
-                        <p className="text-xs text-zinc-600 dark:text-zinc-300">
-                          <strong className="font-semibold text-zinc-800 dark:text-zinc-200">Reason: </strong>
-                          {String(ex.reason ?? "No reason specified")}
-                        </p>
-                        {Boolean(ex.adminResponse) && (
-                          <div className="mt-2 rounded bg-white p-2 text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 border-l-2 border-red-500">
-                            <strong>Admin feedback: </strong>{String(ex.adminResponse)}
+                          <p className="text-xs text-zinc-600 dark:text-zinc-300">
+                            <strong className="font-semibold text-zinc-800 dark:text-zinc-200">Reason: </strong>
+                            {String(ex.reason ?? "No reason specified")}
+                          </p>
+                          {Boolean(ex.adminResponse) && (
+                            <div className="mt-2 rounded bg-white p-2 text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 border-l-2 border-red-500">
+                              <strong>Admin feedback: </strong>{String(ex.adminResponse)}
+                            </div>
+                          )}
+                          <div dir="rtl" className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-600 dark:text-zinc-300 border-t border-zinc-200/60 dark:border-zinc-800 pt-2.5">
+                            <span className="inline-flex items-center gap-1 rounded-md bg-zinc-100 px-2 py-0.5 font-semibold dark:bg-zinc-800">
+                              {isLeaveEx
+                                ? `📅 الإجازة: من ${startStr} إلى ${endStr}`
+                                : `📅 تاريخ الطلب: ${startStr}`}
+                            </span>
+                            <span className="inline-flex items-center gap-1 rounded-md bg-sky-50 px-2 py-0.5 font-semibold text-sky-800 dark:bg-sky-950/50 dark:text-sky-300">
+                              📩 تاريخ تقديم الطلب: <span dir="ltr">{formatSubmittedDateTime(ex.createdAt)}</span>
+                            </span>
                           </div>
-                        )}
-                        <div className="mt-3 flex items-center justify-between text-[11px] text-zinc-400 border-t border-zinc-200/60 dark:border-zinc-800 pt-2">
-                          <span>For: {String(ex.exceptionDate ?? "—")}</span>
-                          <span>Submitted: {toDate(ex.createdAt as Timestamp | undefined)?.toLocaleDateString() ?? "—"}</span>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>

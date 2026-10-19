@@ -63,6 +63,7 @@ export async function submitException(
     type: string;
     lateMinutes: number | null;
     exceptionDate: string;
+    endDate?: string | null;
     reason: string;
     supportingEvidence: string | null;
     requestedAmount?: number | null;
@@ -88,6 +89,10 @@ export async function submitException(
     advance_request: "Salary Advance (سلفة)",
   };
   const label = labelMap[payload.type] || payload.type.replace(/_/g, " ");
+  const dateRangeStr =
+    payload.endDate && payload.endDate !== payload.exceptionDate
+      ? `${payload.exceptionDate} → ${payload.endDate}`
+      : payload.exceptionDate;
 
   import("./adminNotifications")
     .then(({ notifyAdmins }) =>
@@ -96,7 +101,7 @@ export async function submitException(
         category: "hr",
         eventType: "exception_submitted",
         title: `📋 New Request: ${label}`,
-        body: `${payload.workerName} (${payload.exceptionDate}): ${payload.reason.slice(0, 80)}`,
+        body: `${payload.workerName} (${dateRangeStr}): ${payload.reason.slice(0, 80)}`,
         href: "/admin/exceptions",
         actorUid: payload.workerId,
         actorName: payload.workerName,
