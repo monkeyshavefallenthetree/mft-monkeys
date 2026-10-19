@@ -7,6 +7,7 @@ import {
   remainingQuota,
   toArabicDigits,
   UNCOVERED_REASON_AR,
+  validatePermissionRequest,
   type ClockInEvaluation,
   type CycleUsage,
   type Policy2026Config,
@@ -23,9 +24,9 @@ const UNCOVERED_REASON_EN: Record<UncoveredReason, string> = {
 
 /**
  * HR-POL-2026 Smart Late Clock-In Choice Modal:
- * Lets the worker choose whether to cover today's morning lateness using their
- * monthly permission quota (no salary deduction) OR keep their permission quota
- * and accept the lateness salary deduction (or submit an excuse to HR).
+ * Lets the worker request to cover today's morning lateness using their
+ * monthly permission quota (pending Admin approval) OR accept the lateness
+ * salary deduction (or submit an excuse to HR).
  */
 export default function SmartLateClockInModal({
   clockIn,
@@ -57,6 +58,7 @@ export default function SmartLateClockInModal({
   const fmt = (v: number | string) => (isAr ? toArabicDigits(v) : String(v));
 
   const ev = evaluateClockIn(clockIn, usage, cfg);
+  const permVerdict = validatePermissionRequest(ev.lateMinutes, usage, cfg);
   const remNow = remainingQuota(usage, cfg);
   const isVeryLate = parseHm(ev.clockInHm) > parseHm(cfg.veryLateCutoffTime);
   const penaltyDays: 0.25 | 0.5 =
@@ -122,26 +124,48 @@ export default function SmartLateClockInModal({
 
         {/* Body & Choices */}
         <div className="space-y-3 p-5">
+          <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-300">
+            <div className="flex items-center justify-between font-bold">
+              <span>{t("رصيد الأذونات المتاح هذا الشهر:", "Available Monthly Permission Balance:")}</span>
+              <span className="text-emerald-700 dark:text-emerald-400">
+                {t(
+                  `${fmt(remNow.count)} من ${fmt(cfg.permissionMaxCount)} أذونات · ${fmt(remNow.minutes)} د متبقية`,
+                  `${remNow.count}/${cfg.permissionMaxCount} perms · ${remNow.minutes}m left`,
+                )}
+              </span>
+            </div>
+            <p className="mt-1 text-[11px] text-zinc-500">
+              {t(
+                "قاعدة الدقيقة الأولى: أي تأخير ولو دقيقة واحدة (مثل ١١:٠١ بدلاً من ١١:٠٠) يُحسب كإذن تأخير بحد أدنى نصف ساعة (٣٠ دقيقة) وبحد أقصى ساعتين للإذن الواحد، ويُعتمد بعد موافقة الأدمن.",
+                "First-minute rule: any lateness >= 1 min requires at least a 30-min permission (max 2h), subject to Admin approval.",
+              )}
+            </p>
+          </div>
+
           <h3
             id="smart-late-title"
             className="text-center text-[15px] font-bold leading-7 text-zinc-900 dark:text-white"
           >
             {t(
-              "كيف تريد معالجة تأخير اليوم؟ اختر استخدام إذن أو تطبيق الخصم:",
+              "كيف تريد معالجة تأخير اليوم؟ اختر تقديم طلب إذن للأدمن أو تطبيق الخصم:",
               "How would you like to handle today's late arrival?",
             )}
           </h3>
 
-          {!ev.covered && ev.uncoveredReason && (
-            <div className="rounded-2xl border border-red-200 bg-red-50 p-3 text-[12px] leading-6 text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
-              ⚠️{" "}
+          {!ev.covered && (permVerdict.reasonAr || ev.uncoveredReason) && (
+            <div className="rounded-2xl border border-red-300 bg-red-50 p-3.5 text-[12px] leading-6 text-red-900 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
+              <strong className="block font-bold mb-0.5">
+                ❌ {t("سبب عدم إمكانية أخذ إذن لهذا التأخير:", "Why a permission cannot be used:")}
+              </strong>
               {isAr
-                ? UNCOVERED_REASON_AR[ev.uncoveredReason]
-                : UNCOVERED_REASON_EN[ev.uncoveredReason]}
+                ? permVerdict.reasonAr || (ev.uncoveredReason ? UNCOVERED_REASON_AR[ev.uncoveredReason] : "")
+                : ev.uncoveredReason
+                  ? UNCOVERED_REASON_EN[ev.uncoveredReason]
+                  : "Permission unavailable"}
             </div>
           )}
 
-          {/* Option 1: Use a Monthly Permission */}
+          {/* Option 1: Request a Monthly Permission (Requires Admin Approval) */}
           <button
             type="button"
             id="worker-smart-late-permission"
@@ -159,19 +183,19 @@ export default function SmartLateClockInModal({
             <span className="flex-1">
               <span className="flex items-center justify-between gap-2">
                 <b className="text-sm text-emerald-900 dark:text-emerald-200">
-                  {t("استخدام إذن تأخير من رصيدي", "Use a Monthly Permission")}
+                  {t("طلب إذن تأخير من رصيدي (بانتظار موافقة الأدمن)", "Request Monthly Permission (Admin Approval)")}
                 </b>
                 <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-bold text-white">
-                  {t("٠ ج.م خصم", "0 EGP deduct")}
+                  {t(`${fmt(ev.chargedMinutes || 30)} دقيقة`, `${ev.chargedMinutes || 30}m`)}
                 </span>
               </span>
               <span className="mt-0.5 block text-xs text-emerald-800/85 dark:text-emerald-300/85">
                 {ev.covered
                   ? t(
-                      `يُخصم ${fmt(ev.chargedMinutes)} دقيقة من رصيد الأذونات · يتبقى لك ${fmt(ev.remainingAfter.count)} أذونات / ${fmt(ev.remainingAfter.minutes)} دقيقة`,
-                      `Uses ${ev.chargedMinutes} mins from quota · Leaves ${ev.remainingAfter.count} permissions / ${ev.remainingAfter.minutes} mins`,
+                      `إرسال طلب إذن بمدة ${fmt(ev.chargedMinutes)} دقيقة للأدمن للموافقة عليه · يتبقى بعد الموافقة ${fmt(ev.remainingAfter.count)} أذونات / ${fmt(ev.remainingAfter.minutes)} دقيقة`,
+                      `Submits a ${ev.chargedMinutes}m permission request for Admin approval · Leaves ${ev.remainingAfter.count} perms / ${ev.remainingAfter.minutes} mins`,
                     )
-                  : t("غير متاح (رصيد الأذونات لا يغطي هذه المدة)", "Unavailable (quota cannot cover this duration)")}
+                  : t("غير متاح — راجع سبب عدم إمكانية أخذ الإذن أعلاه", "Unavailable — see reason above")}
               </span>
             </span>
           </button>

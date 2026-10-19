@@ -354,6 +354,115 @@ export function checkCoverage(
   return { covered: true };
 }
 
+export interface PermissionRequestVerdict {
+  ok: boolean;
+  requestedMinutes: number;
+  chargedMinutes: number;
+  remainingCount: number;
+  remainingMinutes: number;
+  allowedDurations: number[];
+  reasonCode: UncoveredReason | "below_min" | null;
+  reasonAr: string;
+}
+
+/**
+ * Validates a worker's request for a monthly permission:
+ * - Eligible for all employees starting from Month 1 (including first 6 months).
+ * - Monthly cap: 4 permissions max, 4 hours (240 minutes) max per month.
+ * - Single permission duration: min 30 minutes, max 120 minutes (2 hours).
+ * - First-minute rule: any lateness >= 1 minute is rounded up to at least 30 minutes (and 15-min steps above 30).
+ */
+export function validatePermissionRequest(
+  requestedMinutes: number,
+  usage: CycleUsage = EMPTY_USAGE,
+  cfg: Policy2026Config = POLICY_2026_DEFAULTS,
+): PermissionRequestVerdict {
+  const rem = remainingQuota(usage, cfg);
+  const presets = [30, 45, 60, 75, 90, 105, 120];
+  const allowedDurations =
+    rem.count > 0
+      ? presets.filter((m) => m >= cfg.permissionMinMinutes && m <= cfg.permissionMaxSingleMinutes && m <= rem.minutes)
+      : [];
+
+  if (rem.count <= 0) {
+    return {
+      ok: false,
+      requestedMinutes,
+      chargedMinutes: 0,
+      remainingCount: rem.count,
+      remainingMinutes: rem.minutes,
+      allowedDurations: [],
+      reasonCode: "count_exhausted",
+      reasonAr: `لا يمكنك طلب إذن جديد لأنك استهلكت الحد الأقصى الشهري لعدد الأذونات (${toArabicDigits(cfg.permissionMaxCount)} من ${toArabicDigits(cfg.permissionMaxCount)} أذونات مستخدمة هذا الشهر).`,
+    };
+  }
+
+  if (rem.minutes < cfg.permissionMinMinutes) {
+    return {
+      ok: false,
+      requestedMinutes,
+      chargedMinutes: 0,
+      remainingCount: rem.count,
+      remainingMinutes: rem.minutes,
+      allowedDurations: [],
+      reasonCode: "minutes_exhausted",
+      reasonAr: `لا يمكنك طلب إذن جديد لأن الرصيد المتبقي لك من الساعات هذا الشهر (${toArabicDigits(rem.minutes)} دقيقة) أقل من الحد الأدنى للإذن الواحد (${toArabicDigits(cfg.permissionMinMinutes)} دقيقة من إجمالي ٤ ساعات شهريًا).`,
+    };
+  }
+
+  if (!(requestedMinutes > 0)) {
+    return {
+      ok: false,
+      requestedMinutes,
+      chargedMinutes: 0,
+      remainingCount: rem.count,
+      remainingMinutes: rem.minutes,
+      allowedDurations,
+      reasonCode: "below_min",
+      reasonAr: `يرجى اختيار مدة الإذن المطلوبة (الحد الأدنى للإذن الواحد ${toArabicDigits(cfg.permissionMinMinutes)} دقيقة والحد الأقصى ساعتان).`,
+    };
+  }
+
+  const charged = chargeableMinutes(requestedMinutes, cfg);
+
+  if (requestedMinutes > cfg.permissionMaxSingleMinutes || charged > cfg.permissionMaxSingleMinutes) {
+    return {
+      ok: false,
+      requestedMinutes,
+      chargedMinutes: charged,
+      remainingCount: rem.count,
+      remainingMinutes: rem.minutes,
+      allowedDurations,
+      reasonCode: "over_single_cap",
+      reasonAr: `لا يمكن قبول هذا الإذن لأن المدة المطلوبة (${toArabicDigits(requestedMinutes)} دقيقة) تتجاوز الحد الأقصى المسموح به للإذن الواحد وهو ساعتان (${toArabicDigits(cfg.permissionMaxSingleMinutes)} دقيقة).`,
+    };
+  }
+
+  if (charged > rem.minutes) {
+    return {
+      ok: false,
+      requestedMinutes,
+      chargedMinutes: charged,
+      remainingCount: rem.count,
+      remainingMinutes: rem.minutes,
+      allowedDurations,
+      reasonCode: "minutes_exhausted",
+      reasonAr: `لا يمكنك أخذ إذن بمدة ${toArabicDigits(charged)} دقيقة لأن المتبقي في رصيد ساعاتك الشهري هو ${toArabicDigits(rem.minutes)} دقيقة فقط (من أصل ${toArabicDigits(cfg.permissionMaxMinutes)} دقيقة / ٤ ساعات شهريًا). أقصى مدة يمكنك اختيارها الآن هي ${toArabicDigits(rem.minutes)} دقيقة.`,
+    };
+  }
+
+  return {
+    ok: true,
+    requestedMinutes,
+    chargedMinutes: charged,
+    remainingCount: rem.count,
+    remainingMinutes: rem.minutes,
+    allowedDurations,
+    reasonCode: null,
+    reasonAr: "",
+  };
+}
+
 /* ────────────────────────────── Shift / clock-in ────────────────────────────── */
 
 /**
@@ -511,11 +620,35 @@ export function evaluateEarlyLeave(
 
 export type LeavePhase = "probation" | "year1" | "year2plus";
 
+/**
+ * Year-1 Annual Leave Labor Law mode:
+ * - `"new_15"` (Default — قانون العمل الجديد): 15 days in Year 1 (7.5d after 6 months + 1.25/month for months 7..12), then 21 days/year from Month 13+.
+ * - `"legacy_21"` (قانون عمل قديم): 21 days from Year 1 (10.5d after 6 months + 1.75/month for months 7..12), continuing at 21 days/year from Month 13+.
+ */
+export type LeaveLawType = "new_15" | "legacy_21";
+
 export const LEAVE_PHASE_AR: Record<LeavePhase, string> = {
   probation: "فترة الاختبار",
-  year1: "السنة الأولى (١٥ يوم)",
-  year2plus: "السنة الثانية فأكثر (٢١ يوم)",
+  year1: "السنة الأولى (١٥ يوم / ١٫٢٥ شهرياً)",
+  year2plus: "ما بعد السنة الأولى (٢١ يوم / ١٫٧٥ شهرياً)",
 };
+
+export function leavePhaseLabelAr(accrual: Pick<LeaveAccrualResult, "phase" | "leaveLawType">): string {
+  if (accrual.phase === "year1" && accrual.leaveLawType === "legacy_21") {
+    return "السنة الأولى — قانون قديم (٢١ يوم / ١٫٧٥ شهرياً)";
+  }
+  return LEAVE_PHASE_AR[accrual.phase];
+}
+
+export function leavePhaseLabelEn(accrual: Pick<LeaveAccrualResult, "phase" | "leaveLawType">): string {
+  if (accrual.phase === "probation") return "Probation Period (6m)";
+  if (accrual.phase === "year1") {
+    return accrual.leaveLawType === "legacy_21"
+      ? "Year 1 — Old Law (21d / 1.75/mo)"
+      : "Year 1 (15d / 1.25/mo)";
+  }
+  return "Post-Year 1 (21d / 1.75/mo)";
+}
 
 export interface AccrualRow {
   /** 1-based service month number. */
@@ -535,15 +668,26 @@ export interface LeaveAccrualResult {
   hireDate: string;
   asOf: string;
   phase: LeavePhase;
+  /** Whether the worker is on the default 15d Year-1 law ("new_15") or Old Labor Law 21d in Year 1 ("legacy_21"). */
+  leaveLawType: LeaveLawType;
   serviceMonths: number;
   probationEndsOn: string;
-  /** Date the 21-day tier (1.75/month) starts. */
+  /** Date the post-Year-1 tier starts (Month 13). */
   tier2StartsOn: string;
+  /** Annual entitlement for the current tier (0 in probation, 15 or 21 in year1, 21 in year2plus). */
+  annualEntitlementDays: number;
+  /** Days accrued within the current leave year. */
+  currentYearAccruedDays: number;
   accruedDays: number;
   usedDays: number;
   priorUsedLeaveDays: number;
   forfeitedDays: number;
+  /** Unused balance legally carried over at the start of the current leave year (capped at maxCarryOverDays). */
+  legalCarryOverDays: number;
+  /** Management-approved carried-over balance added on top (worker.carriedOverLeaveDays). */
   carriedOverApproved: number;
+  /** Total carried-over balance (legalCarryOverDays + carriedOverApproved). */
+  totalCarryOverDays: number;
   balance: number;
   /** Balance rounded down to the 0.5-day request step. */
   requestableDays: number;
@@ -552,6 +696,8 @@ export interface LeaveAccrualResult {
 }
 
 export interface LeaveAccrualOptions {
+  /** Year-1 Labor Law option: `"new_15"` (15 days first year, default) or `"legacy_21"` (Old Labor Law: 21 days first year). */
+  leaveLawType?: LeaveLawType;
   /** Approved annual leave taken (each item: date + days, supports 0.5). */
   usedLeave?: { date: string; days: number }[];
   /** Leave days already consumed before the MFT system launched (for existing workers). */
@@ -571,12 +717,14 @@ export interface LeaveAccrualOptions {
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 /**
- * V2.0 accrual:
- *   months 1..6            → 0 (probation)
- *   months 7..18           → 1.25 / completed month   (= 15 days)
- *   month 19 onwards       → 1.75 / completed month   (= 21 days / leave-year)
- * At each leave-year boundary (month 19, 31, 43 …) the unused balance is capped
- * to `maxCarryOverDays`; management-approved carry-over is added on top.
+ * HR-POL-2026 Annual Leave Accrual:
+ *   - First 6 months (months 1..6, while serviceMonths < 6): probation → 0 paid annual leave (unpaid leave allowed).
+ *   - Upon completing 6 months (serviceMonths >= 6):
+ *     • Default (`"new_15"`): 7.5 days drop retroactively for the first 6 months (6 × 1.25), then +1.25/month in months 7..12 → 15 days in Year 1.
+ *     • Old Labor Law (`"legacy_21"`): 10.5 days drop retroactively for the first 6 months (6 × 1.75), then +1.75/month in months 7..12 → 21 days in Year 1.
+ *   - Post-Year 1 (month 13 onwards — استحقاق ما بعد السنة الأولى): rate is 1.75 days / completed month
+ *     (= 21 days / year), plus legally carried-over balance (capped at `maxCarryOverDays`) and
+ *     management-approved carry-over (`carriedOverApproved`).
  */
 export function computeLeaveAccrual(
   hireDateYmd: string,
@@ -586,8 +734,11 @@ export function computeLeaveAccrual(
 ): LeaveAccrualResult {
   const hire = parseYmd(hireDateYmd) ?? new Date(asOf);
   const serviceMonths = completedMonthsBetween(hire, asOf);
-  const prob = cfg.probationMonths;
-  const tier2From = prob + cfg.year1AccrualMonths + 1; // 19
+  const prob = cfg.probationMonths; // 6
+  const year1TotalMonths = Math.max(prob, cfg.year1AccrualMonths); // 12 months total for Year 1
+  const tier2From = year1TotalMonths + 1; // 13 (Month 13 onwards = 1.75/month, 21 days/year)
+  const leaveLawType: LeaveLawType = opts.leaveLawType === "legacy_21" ? "legacy_21" : "new_15";
+  const year1Rate = leaveLawType === "legacy_21" ? cfg.leaveRateYear2 : cfg.leaveRateYear1;
   const used = [...(opts.usedLeave ?? [])].sort((a, b) => a.date.localeCompare(b.date));
   const excluded = new Set(opts.excludedMonths ?? []);
   const carried = Math.max(0, opts.carriedOverApproved ?? 0);
@@ -600,23 +751,38 @@ export function computeLeaveAccrual(
   const schedule: AccrualRow[] = [];
   let balance = 0;
   let accruedTotal = 0;
+  let currentYearAccrued = 0;
+  let legalCarryOver = 0;
   let forfeitedTotal = 0;
   let usedTotal = 0;
   let usedIdx = 0;
+  let probationEligibleMonths = 0;
 
   // Simulate every completed month plus the current (in-progress) month for usage attribution.
   const lastMonth = serviceMonths + 1;
   for (let k = 1; k <= lastMonth; k++) {
     const pStart = addMonthsClamped(hire, k - 1);
     const pEndExclusive = addMonthsClamped(hire, k);
-    const phase: LeavePhase = k <= prob ? "probation" : k < tier2From ? "year1" : "year2plus";
+    const isCompleted = k <= serviceMonths;
+    const monthKey = ymd(pStart).slice(0, 7);
+    const isExcluded = excluded.has(monthKey);
+    const phase: LeavePhase =
+      k < prob || (k === prob && !isCompleted)
+        ? "probation"
+        : k < tier2From
+          ? "year1"
+          : "year2plus";
 
-    // Leave-year boundary carry-over cap (start of month 19, 31, 43 …).
+    // Leave-year boundary carry-over cap (start of month 13, 25, 37 … when that month completes).
     let forfeited = 0;
-    if (k >= tier2From && (k - tier2From) % 12 === 0 && balance > cfg.maxCarryOverDays) {
-      forfeited = round2(balance - cfg.maxCarryOverDays);
-      balance = cfg.maxCarryOverDays;
-      forfeitedTotal += forfeited;
+    if (isCompleted && k >= tier2From && (k - tier2From) % 12 === 0) {
+      if (balance > cfg.maxCarryOverDays) {
+        forfeited = round2(balance - cfg.maxCarryOverDays);
+        balance = cfg.maxCarryOverDays;
+        forfeitedTotal += forfeited;
+      }
+      legalCarryOver = round2(Math.max(0, balance));
+      currentYearAccrued = 0;
     }
 
     let usedThis = 0;
@@ -626,7 +792,7 @@ export function computeLeaveAccrual(
       usedIdx++;
     }
     // Pre-system leave belongs to the leave year that contains the recording date.
-    // If recorded on the exact anniversary day ending a leave year (e.g. month 18), deduct before next month's cap.
+    // If recorded on the exact anniversary day ending a leave year (e.g. month 12), deduct before next month's cap.
     const nextIsCapBoundary = k + 1 >= tier2From && (k + 1 - tier2From) % 12 === 0;
     let priorThis = 0;
     if (
@@ -640,14 +806,25 @@ export function computeLeaveAccrual(
     balance -= usedThis + priorThis;
     usedTotal += usedThis;
 
-    const isCompleted = k <= serviceMonths;
-    const monthKey = ymd(pStart).slice(0, 7);
-    const isExcluded = excluded.has(monthKey);
+    if (k <= prob && isCompleted && !isExcluded) {
+      probationEligibleMonths++;
+    }
+
     let accrued = 0;
-    if (isCompleted && !isExcluded && phase !== "probation") {
-      accrued = phase === "year1" ? cfg.leaveRateYear1 : cfg.leaveRateYear2;
+    if (isCompleted) {
+      if (k < prob) {
+        // Months 1..5: still inside the 6-month probation window; retroactive drop occurs at completion of month 6.
+        accrued = 0;
+      } else if (k === prob) {
+        // Completion of month 6: retroactive 7.5d ("new_15") or 10.5d ("legacy_21"), excluding unpaid/excluded months in 1..6.
+        accrued = round2(probationEligibleMonths * year1Rate);
+      } else if (!isExcluded) {
+        // Months 7..12 accrue at year1Rate (1.25/mo → 15d or 1.75/mo → 21d); Month 13+ accrues at 1.75/mo (21d/year).
+        accrued = k < tier2From ? year1Rate : cfg.leaveRateYear2;
+      }
       balance += accrued;
       accruedTotal += accrued;
+      currentYearAccrued += accrued;
     }
 
     if (isCompleted || usedThis > 0 || priorThis > 0) {
@@ -673,22 +850,35 @@ export function computeLeaveAccrual(
 
   usedTotal = round2(usedTotal + priorUsed);
   balance = round2(balance + carried - priorPending);
-  const phase: LeavePhase = serviceMonths < prob ? "probation" : serviceMonths < tier2From - 1 ? "year1" : "year2plus";
+  const phase: LeavePhase =
+    serviceMonths < prob ? "probation" : serviceMonths < year1TotalMonths ? "year1" : "year2plus";
+  const annualEntitlementDays =
+    phase === "probation"
+      ? 0
+      : phase === "year1"
+        ? round2(year1Rate * year1TotalMonths)
+        : round2(cfg.leaveRateYear2 * 12);
+  const totalCarryOverDays = round2(legalCarryOver + carried);
   return {
     hireDate: ymd(hire),
     asOf: ymd(asOf),
     phase,
+    leaveLawType,
     serviceMonths,
     probationEndsOn: ymd(addMonthsClamped(hire, prob)),
-    tier2StartsOn: ymd(addMonthsClamped(hire, tier2From - 1)),
+    tier2StartsOn: ymd(addMonthsClamped(hire, year1TotalMonths)),
+    annualEntitlementDays,
+    currentYearAccruedDays: round2(currentYearAccrued),
     accruedDays: round2(accruedTotal),
     usedDays: usedTotal,
     priorUsedLeaveDays: round2(priorUsed),
     forfeitedDays: round2(forfeitedTotal),
+    legalCarryOverDays: legalCarryOver,
     carriedOverApproved: carried,
+    totalCarryOverDays,
     balance,
     requestableDays: Math.max(0, Math.floor(balance * 2) / 2),
-    monthlyRate: phase === "probation" ? 0 : phase === "year1" ? cfg.leaveRateYear1 : cfg.leaveRateYear2,
+    monthlyRate: phase === "probation" ? 0 : phase === "year1" ? year1Rate : cfg.leaveRateYear2,
     schedule,
   };
 }
@@ -699,7 +889,16 @@ export function validateLeaveRequest(
   requestedDays: number,
 ): { ok: true } | { ok: false; reasonAr: string } {
   if (accrual.phase === "probation") {
-    return { ok: false, reasonAr: `لا يحق الحصول على إجازة سنوية خلال فترة الاختبار (تنتهي ${accrual.probationEndsOn}).` };
+    return {
+      ok: false,
+      reasonAr: `لا يحق الحصول على إجازة سنوية خلال فترة الاختبار (رصيدك المتاح حالياً: ٠ يوم — تنتهي فترة الاختبار في ${accrual.probationEndsOn}).`,
+    };
+  }
+  if (accrual.requestableDays <= 0) {
+    return {
+      ok: false,
+      reasonAr: `لا يمكنك إرسال طلب إجازة سنوية لأن رصيدك المتاح حالياً هو (٠ يوم) — لا يُسمح بالرصيد السالب.`,
+    };
   }
   if (!(requestedDays > 0) || Math.round(requestedDays * 2) !== requestedDays * 2) {
     return { ok: false, reasonAr: "يجب أن تكون مدة الإجازة بمضاعفات نصف يوم." };
@@ -707,7 +906,7 @@ export function validateLeaveRequest(
   if (requestedDays > accrual.requestableDays) {
     return {
       ok: false,
-      reasonAr: `الرصيد المتاح ${toArabicDigits(accrual.requestableDays)} يوم فقط — لا يسمح بالرصيد السالب.`,
+      reasonAr: `الرصيد المتاح لك حالياً ${toArabicDigits(accrual.requestableDays)} يوم فقط (طلبت ${toArabicDigits(requestedDays)} يوم) — لا يُسمح بطلب إجازة تتجاوز رصيدك أو بالرصيد السالب.`,
     };
   }
   return { ok: true };

@@ -60,19 +60,26 @@ import FirebaseSetupWarning from "./FirebaseSetupWarning";
 import { toast, confirmDialog } from "@/lib/worker/feedback";
 import { useTheme, type Theme } from "@/lib/worker/theme";
 import {
+  chargeableMinutes,
   computeLeaveAccrual,
   evaluateClockIn,
   formatHm,
   isPolicy2026Active,
+  LEAVE_PHASE_AR,
+  leavePhaseLabelAr,
   minutesOfDay,
   policyConfigFromSettings,
   priorUsedRecordedOn,
+  remainingQuota,
   requiredShiftEnd,
+  toArabicDigits,
   usageFromLedger,
   validateLeaveRequest,
+  validatePermissionRequest,
   type ClockInEvaluation,
   type CycleUsage,
   type EarlyLeaveEvaluation,
+  type LeaveLawType,
   type Policy2026Config,
 } from "@/lib/worker/hrPolicy2026";
 import {
@@ -115,6 +122,7 @@ type WorkerDoc = {
   /** HR-POL-2026 leave profile (set by admin). */
   hireDate?: string;
   attendanceStartDate?: string;
+  leaveLawType?: LeaveLawType;
   priorUsedLeaveDays?: number;
   carriedOverLeaveDays?: number;
 };
@@ -182,9 +190,11 @@ function exceptionLabel(ex: ExceptionRow): string {
   const days = Number(ex.leaveDays) || 1;
   switch (ex.type) {
     case "late":
-      return `Late arrival · ${mins}m`;
+      return `Late Excuse (استثناء تأخير) · ${mins}m`;
     case "advance_late":
-      return `Advance Late Permission (إذن تأخير مسبق) · ${mins}m`;
+      return `Late Permission (إذن تأخير شهري) · ${mins}m`;
+    case "early_permission":
+      return `Early Leave Permission (إذن انصراف مبكر) · ${mins}m`;
     case "overtime":
       return `Overtime · +${mins}m`;
     case "absent":
@@ -723,36 +733,59 @@ export default function DashboardApp() {
           const dateYmd = localYmd(ws.startTime);
 
           if (ev.isEarly) {
+            // Do NOT count permission automatically by itself — record covered: false until Admin approves
             await chargeEarlyLeave(
               fb.db,
               { uid, name: wName, email: profile?.email },
               dateYmd,
               range.startYmd,
               ev,
-              choice === "permission" && ev.canUsePermission,
+              false,
               formatHm(minutesOfDay(ctx.requiredEnd)),
             );
+            if (choice === "permission" && ev.canUsePermission) {
+              await submitException(fb.db, {
+                workerId: uid,
+                workerName: wName,
+                workerEmail: profile?.email ?? "",
+                type: "early_permission",
+                lateMinutes: ev.chargedMinutes,
+                exceptionDate: dateYmd,
+                reason: `[طلب إذن انصراف مبكر (${ev.remainingMinutes} د متبقية ← ${ev.chargedMinutes} د من الرصيد الشهري)] بانتظار موافقة الأدمن`,
+                supportingEvidence: null,
+              });
+            }
           }
 
           // Also record late arrival decision if the worker clocked in late today and hasn't recorded it yet
           const hasLateEntry = ledger.some((e) => e.date === dateYmd && e.kind === "late" && e.status === "applied");
-          if (!hasLateEntry) {
-            const lateEv = evaluateClockIn(ws.startTime, policyRef.current.usage, policyRef.current.cfg);
-            if (lateEv.status !== "on-time") {
-              const penaltyDays: 0.25 | 0.5 = lateEv.fallbackPenaltyDays === 0.5 ? 0.5 : 0.25;
-              await chargeLatePermission(
-                fb.db,
-                { uid, name: wName, email: profile?.email },
-                dateYmd,
-                range.startYmd,
-                lateEv,
-                {
-                  usePermission: choice === "permission" && !ev.isEarly && lateEv.covered,
-                  penaltyDays,
-                  overwrite: true,
-                },
-              ).catch(() => {});
-            }
+          const lateEv = evaluateClockIn(ws.startTime, policyRef.current.usage, policyRef.current.cfg);
+          if (!hasLateEntry && lateEv.status !== "on-time") {
+            const penaltyDays: 0.25 | 0.5 = lateEv.fallbackPenaltyDays === 0.5 ? 0.5 : 0.25;
+            await chargeLatePermission(
+              fb.db,
+              { uid, name: wName, email: profile?.email },
+              dateYmd,
+              range.startYmd,
+              lateEv,
+              {
+                usePermission: false,
+                penaltyDays,
+                overwrite: true,
+              },
+            ).catch(() => {});
+          }
+          if (choice === "permission" && !ev.isEarly && lateEv.status !== "on-time" && lateEv.covered) {
+            await submitException(fb.db, {
+              workerId: uid,
+              workerName: wName,
+              workerEmail: profile?.email ?? "",
+              type: "advance_late",
+              lateMinutes: lateEv.chargedMinutes,
+              exceptionDate: dateYmd,
+              reason: `[طلب إذن تأخير صباحي (${lateEv.lateMinutes} د فعلي ← ${lateEv.chargedMinutes} د من الرصيد الشهري)] بانتظار موافقة الأدمن`,
+              supportingEvidence: null,
+            });
           }
         } catch (e) {
           console.error("early leave ledger failed", e);
@@ -765,7 +798,7 @@ export default function DashboardApp() {
       setSmartOut(null);
       const reason =
         choice === "permission"
-          ? "تم الانصراف مع استخدام إذن من الرصيد الشهري ✓"
+          ? "تم الانصراف وإرسال طلب الإذن للأدمن للموافقة ⏳"
           : choice === "deduct"
             ? "تم الانصراف وتطبيق خصم التأخير / عدم استكمال الساعات 💸"
             : choice === "break"
@@ -777,7 +810,7 @@ export default function DashboardApp() {
     [smartOut, uid, profile, hrSettings.monthStartDay, ledger, handleLogout, clockOut, setTab],
   );
 
-  /** Resolves the HR-POL-2026 smart late clock-in choice (use permission vs. salary deduction). */
+  /** Resolves the HR-POL-2026 smart late clock-in choice (request permission vs. salary deduction). */
   const onSmartLateChoice = useCallback(
     async (choice: SmartLateClockInChoice, ev: ClockInEvaluation, penaltyDays: 0.25 | 0.5) => {
       const ctx = smartLateIn;
@@ -788,12 +821,25 @@ export default function DashboardApp() {
         const date = localYmd(ctx.clockIn);
         const range = getPayrollCycleRange(ctx.clockIn, hrSettings.monthStartDay);
         const name = `${profile.firstName ?? ""} ${profile.lastName ?? ""}`.trim() || (profile.email ?? "Worker");
-        const usePermission = choice === "permission" && ev.covered;
+        const wantsPermission = choice === "permission" && ev.covered;
+        // Record lateness with usePermission: false initially — permission is NEVER counted until Admin approves!
         await chargeLatePermission(fb.db, { uid, name, email: profile.email }, date, range.startYmd, ev, {
-          usePermission,
+          usePermission: false,
           penaltyDays,
           overwrite: true,
         });
+        if (wantsPermission) {
+          await submitException(fb.db, {
+            workerId: uid,
+            workerName: name,
+            workerEmail: profile.email ?? "",
+            type: "advance_late",
+            lateMinutes: ev.chargedMinutes,
+            exceptionDate: date,
+            reason: `[طلب إذن تأخير صباحي (${ev.lateMinutes} د فعلي ← ${ev.chargedMinutes} د من الرصيد الشهري)] بانتظار موافقة الأدمن`,
+            supportingEvidence: null,
+          });
+        }
         playTerminalBeep();
         setSmartLateIn(null);
         if (choice === "excuse") {
@@ -802,9 +848,9 @@ export default function DashboardApp() {
           toast.info("تم فتح نموذج طلب استثناء", {
             description: "اكتب سبب التأخير القهري لإرساله إلى الموارد البشرية.",
           });
-        } else if (usePermission) {
-          toast.success("تم استخدام إذن تأخير صباحي ✓", {
-            description: `تم خصم ${ev.chargedMinutes} دقيقة من رصيد الأذونات الشهري (بدون أي خصم مالي من الراتب).`,
+        } else if (wantsPermission) {
+          toast.success("تم إرسال طلب إذن التأخير للأدمن للموافقة ⏳", {
+            description: `تم طلب خصم ${ev.chargedMinutes} دقيقة من رصيد الأذونات الشهري. لن يُحتسب الإذن تلقائياً إلا بعد موافقة الإدارة.`,
             duration: 8000,
           });
         } else {
@@ -1542,8 +1588,25 @@ export default function DashboardApp() {
       return;
     }
 
-    if ((type === "late" || type === "advance_late") && (!lateMinutes || lateMinutes < 15 || lateMinutes > 180)) {
-      toast.warning("يرجى إدخال دقائق التأخير بين 15 و 180 دقيقة (15–180 mins).");
+    const isPermissionReq = type === "advance_late" || type === "early_permission";
+    let effectiveMinutes = lateMinutes;
+
+    if (isPermissionReq) {
+      const permVerdict = validatePermissionRequest(
+        lateMinutes ?? 0,
+        policyRef.current.usage,
+        policyRef.current.cfg,
+      );
+      if (!permVerdict.ok) {
+        toast.error("لا يمكن تقديم طلب الإذن الشهري", {
+          description: permVerdict.reasonAr,
+          duration: 9000,
+        });
+        return;
+      }
+      effectiveMinutes = permVerdict.chargedMinutes;
+    } else if (type === "late" && (!lateMinutes || lateMinutes < 1 || lateMinutes > 180)) {
+      toast.warning("يرجى إدخال دقائق التأخير بين 1 و 180 دقيقة (1–180 mins).");
       return;
     }
     if (type === "overtime" && (!lateMinutes || lateMinutes < 15 || lateMinutes > 360)) {
@@ -1563,32 +1626,31 @@ export default function DashboardApp() {
         return;
       }
     }
-    if (type === "annual_leave" && policyRef.current.active) {
-      // HR-POL-2026: no annual leave during probation, no negative balance, 0.5-day steps.
-      const hire = profile.hireDate || (profile.createdAt?.toDate ? localYmd(profile.createdAt.toDate()) : null);
-      if (hire) {
-        const booked = exceptions
-          .filter((x) => x.type === "annual_leave" && (!x.status || x.status === "pending" || x.status === "approved"))
-          .map((x) => ({ date: String(x.exceptionDate ?? ""), days: Number(x.leaveDays) || 1 }));
-        const acc = computeLeaveAccrual(
-          hire,
-          new Date(),
-          {
-            usedLeave: booked,
-            carriedOverApproved: Number(profile.carriedOverLeaveDays) || 0,
-            priorUsedLeaveDays: Number(profile.priorUsedLeaveDays) || 0,
-            priorUsedAsOf: priorUsedRecordedOn(profile, hrSettings),
-          },
-          policyRef.current.cfg,
-        );
-        const verdict = validateLeaveRequest(acc, leaveDaysVal || 0);
-        if (!verdict.ok) {
-          toast.warning("لا يمكن تقديم طلب الإجازة السنوية المدفوعة", {
-            description: `${verdict.reasonAr} — يمكنك اختيار «إجازة بدون مرتب (Unpaid Leave)».`,
-            duration: 9000,
-          });
-          return;
-        }
+    if (type === "annual_leave") {
+      // HR-POL-2026: no annual leave during probation or when balance is 0, no negative balance, 0.5-day steps.
+      const hire = profile.hireDate || (profile.createdAt?.toDate ? localYmd(profile.createdAt.toDate()) : localYmd());
+      const booked = exceptions
+        .filter((x) => x.type === "annual_leave" && (!x.status || x.status === "pending" || x.status === "approved"))
+        .map((x) => ({ date: String(x.exceptionDate ?? ""), days: Number(x.leaveDays) || 1 }));
+      const acc = computeLeaveAccrual(
+        hire,
+        new Date(),
+        {
+          leaveLawType: profile.leaveLawType,
+          usedLeave: booked,
+          carriedOverApproved: Number(profile.carriedOverLeaveDays) || 0,
+          priorUsedLeaveDays: Number(profile.priorUsedLeaveDays) || 0,
+          priorUsedAsOf: priorUsedRecordedOn(profile, hrSettings),
+        },
+        policyRef.current.cfg,
+      );
+      const verdict = validateLeaveRequest(acc, leaveDaysVal || 0);
+      if (acc.requestableDays <= 0 || !verdict.ok) {
+        toast.error("لا يمكن إرسال طلب الإجازة السنوية المدفوعة", {
+          description: `${!verdict.ok ? verdict.reasonAr : "رصيدك المتاح حالياً هو (٠ يوم)."} — يمكنك اختيار «إجازة بدون مرتب (Unpaid Leave)».`,
+          duration: 9000,
+        });
+        return;
       }
     }
     if (!reason) {
@@ -1606,27 +1668,29 @@ export default function DashboardApp() {
         workerName: `${profile.firstName ?? ""} ${profile.lastName ?? ""}`.trim() || (profile.email ?? "Worker"),
         workerEmail: profile.email ?? "",
         type,
-        lateMinutes,
+        lateMinutes: effectiveMinutes,
         exceptionDate,
         endDate,
         reason:
           type === "advance_request"
             ? `[Salary Advance $${requestedAmount}]: ${reason}`
             : type === "advance_late"
-              ? `[إذن تأخير مسبق ليوم ${exceptionDate} (${lateMinutes} دقيقة)]: ${reason}`
-              : type === "unpaid_leave"
-                ? `[إجازة بدون مرتب ${dateRangeLabel} (${leaveDaysVal || 1} يوم)]: ${reason}`
-                : isLeave
-                  ? `[إجازة ${dateRangeLabel} (${leaveDaysVal || 1} يوم)]: ${reason}`
-                  : reason,
+              ? `[طلب إذن تأخير شهري ليوم ${exceptionDate} (${effectiveMinutes} دقيقة من الرصيد - بانتظار موافقة الأدمن)]: ${reason}`
+              : type === "early_permission"
+                ? `[طلب إذن انصراف مبكر شهري ليوم ${exceptionDate} (${effectiveMinutes} دقيقة من الرصيد - بانتظار موافقة الأدمن)]: ${reason}`
+                : type === "unpaid_leave"
+                  ? `[إجازة بدون مرتب ${dateRangeLabel} (${leaveDaysVal || 1} يوم)]: ${reason}`
+                  : isLeave
+                    ? `[إجازة ${dateRangeLabel} (${leaveDaysVal || 1} يوم)]: ${reason}`
+                    : reason,
         supportingEvidence,
         requestedAmount: type === "advance_request" ? requestedAmount : null,
         leaveDays: isLeave ? leaveDaysVal || 1 : null,
       });
 
-      const extendsToday = type === "overtime" && !!lateMinutes && exceptionDate === localYmd();
-      if (extendsToday && lateMinutes) {
-        const newOt = overtimeMinutes + lateMinutes;
+      const extendsToday = type === "overtime" && !!effectiveMinutes && exceptionDate === localYmd();
+      if (extendsToday && effectiveMinutes) {
+        const newOt = overtimeMinutes + effectiveMinutes;
         setOvertimeMinutes(newOt);
         sessionStorage.setItem("workerOvertimeMinutes", String(newOt));
         shiftWarningGivenRef.current = false;
@@ -1647,14 +1711,18 @@ export default function DashboardApp() {
           : type === "advance_request"
           ? "Advance request sent"
           : type === "advance_late"
-          ? "تم إرسال طلب إذن التأخير المسبق ✓"
+          ? "تم إرسال طلب إذن التأخير للأدمن للموافقة ⏳"
+          : type === "early_permission"
+          ? "تم إرسال طلب إذن الانصراف المبكر للأدمن للموافقة ⏳"
           : type === "unpaid_leave"
           ? "تم إرسال طلب الإجازة بدون مرتب ✓"
           : "Request sent to HR",
         {
-          description: extendsToday
-            ? `Today's shift extended by ${lateMinutes} minutes. You'll be notified when it's reviewed.`
-            : "You'll get a notification here as soon as it's reviewed.",
+          description: isPermissionReq
+            ? `تم طلب إذن مدته ${effectiveMinutes} دقيقة ليوم ${exceptionDate}. لن يُحتسب الإذن أو يُخصم من الرصيد إلا بعد موافقة الأدمن.`
+            : extendsToday
+              ? `Today's shift extended by ${effectiveMinutes} minutes. You'll be notified when it's reviewed.`
+              : "You'll get a notification here as soon as it's reviewed.",
         },
       );
     } catch {
@@ -1713,27 +1781,26 @@ export default function DashboardApp() {
     .filter((a) => a.type === "allowance" && a.status !== "cancelled")
     .reduce((acc, a) => acc + (Number(a.amount) || 0), 0);
 
-  // HR-POL-2026 derived values (Time tab card)
+  // HR-POL-2026 derived values (Time tab card & Exceptions tab)
   const todayRequiredEnd = firstClockIn && localYmd(firstClockIn) === todayYmd ? requiredShiftEnd(firstClockIn, policyCfg) : null;
   const hireFromProfile = profile.hireDate || null;
   const hireFallback = !hireFromProfile && profile.createdAt?.toDate ? localYmd(profile.createdAt.toDate()) : null;
   const bookedLeave = exceptions
-    .filter((x) => x.type === "annual_leave" && x.status === "approved")
+    .filter((x) => x.type === "annual_leave" && (!x.status || x.status === "pending" || x.status === "approved"))
     .map((x) => ({ date: String(x.exceptionDate ?? ""), days: Number(x.leaveDays) || 1 }));
-  const effectiveHire = hireFromProfile ?? hireFallback;
-  const leaveAccrual = effectiveHire
-    ? computeLeaveAccrual(
-        effectiveHire,
-        new Date(),
-        {
-          usedLeave: bookedLeave,
-          carriedOverApproved: Number(profile.carriedOverLeaveDays) || 0,
-          priorUsedLeaveDays: Number(profile.priorUsedLeaveDays) || 0,
-          priorUsedAsOf: priorUsedRecordedOn(profile, hrSettings),
-        },
-        policyCfg,
-      )
-    : null;
+  const effectiveHire = hireFromProfile ?? hireFallback ?? todayYmd;
+  const leaveAccrual = computeLeaveAccrual(
+    effectiveHire,
+    new Date(),
+    {
+      leaveLawType: profile.leaveLawType,
+      usedLeave: bookedLeave,
+      carriedOverApproved: Number(profile.carriedOverLeaveDays) || 0,
+      priorUsedLeaveDays: Number(profile.priorUsedLeaveDays) || 0,
+      priorUsedAsOf: priorUsedRecordedOn(profile, hrSettings),
+    },
+    policyCfg,
+  );
   const todayLateEntry = ledger.find((e) => e.date === todayYmd && e.kind === "late" && e.status === "applied") ?? null;
   const usageBeforeTodayLate = usageFromLedger(
     ledger.filter((e) => !(e.date === todayYmd && e.kind === "late")),
@@ -2451,6 +2518,7 @@ export default function DashboardApp() {
               now={new Date()}
               hireDate={hireFromProfile ?? hireFallback}
               hireDateIsFallback={!hireFromProfile && !!hireFallback}
+              leaveLawType={profile.leaveLawType}
               usedLeave={bookedLeave}
               priorUsedLeaveDays={Number(profile.priorUsedLeaveDays) || 0}
               priorUsedAsOf={priorUsedRecordedOn(profile, hrSettings)}
@@ -2592,7 +2660,25 @@ export default function DashboardApp() {
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               {/* Form */}
               <div className="ui-card p-6">
-                <h3 className="text-sm font-bold text-zinc-900 dark:text-white mb-4">New request</h3>
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold text-zinc-900 dark:text-white">New request</h3>
+                  <div
+                    dir="rtl"
+                    className={`inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-xs font-extrabold ${
+                      leaveAccrual.requestableDays > 0 && leaveAccrual.phase !== "probation"
+                        ? "border-sky-300 bg-sky-50 text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200"
+                        : "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+                    }`}
+                  >
+                    <span>🌴 رصيد إجازاتك السنوية المتاح:</span>
+                    <span className="rounded-lg bg-white px-2 py-0.5 font-mono text-sm font-black shadow-2xs dark:bg-zinc-900">
+                      {toArabicDigits(leaveAccrual.requestableDays)} يوم
+                    </span>
+                    <span className="text-[11px] font-semibold opacity-80">
+                      ({leavePhaseLabelAr(leaveAccrual)})
+                    </span>
+                  </div>
+                </div>
                 <form onSubmit={(e) => void onExceptionSubmit(e)} className="space-y-4">
                   <div>
                     <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1.5" htmlFor="exceptionType">
@@ -2601,12 +2687,17 @@ export default function DashboardApp() {
                     <input type="hidden" id="exceptionType" name="exceptionType" value={exceptionType} />
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2" role="radiogroup" aria-label="Request type">
                       {([
-                        ["advance_late", "Advance Late (إذن تأخير مسبق)", ICON.time],
+                        ["advance_late", "إذن تأخير شهري (Late Permission)", ICON.time],
+                        ["early_permission", "إذن انصراف مبكر (Early Permission)", ICON.time],
                         ["unpaid_leave", "Unpaid Leave (إجازة بدون مرتب)", ICON.calendar],
                         ["late", "Late Excuse (استثناء تأخير)", ICON.time],
                         ["absent", "Absence Excuse (عذر غياب)", ICON.exceptions],
                         ["overtime", "Overtime (إضافي)", ICON.bolt],
-                        ["annual_leave", "Annual Leave (إجازة سنوية)", ICON.calendar],
+                        [
+                          "annual_leave",
+                          `Annual Leave (إجازة سنوية — رصيدك: ${toArabicDigits(leaveAccrual.requestableDays)} يوم)`,
+                          ICON.calendar,
+                        ],
                         ["sick_leave", "Sick Leave (مرضية)", ICON.shield],
                         ["emergency_leave", "Emergency (عارضة)", ICON.sparkles],
                         ["advance_request", "Salary Advance (سلفة)", ICON.cash],
@@ -2630,20 +2721,125 @@ export default function DashboardApp() {
                     </div>
                   </div>
 
-                  {(exceptionType === "late" || exceptionType === "advance_late") && (
-                    <div className="space-y-2.5">
-                      {exceptionType === "advance_late" && (
-                        <div className="rounded-xl border border-violet-300 bg-violet-50/80 p-3.5 text-xs text-violet-900 dark:border-violet-800 dark:bg-violet-950/30 dark:text-violet-200" dir="rtl">
-                          ⏰ <strong>طلب إذن مسبق بالتأخير في يوم معين:</strong> حدد التاريخ الذي ستتأخر فيه من حقل التاريخ بالأسفل ومدة التأخير المتوقعة والسبب، ليتم تسجيل الإذن مسبقًا وعدم تطبيق خصم تأخير في ذلك اليوم.
+                  {(exceptionType === "advance_late" || exceptionType === "early_permission") && (() => {
+                    const permRem = remainingQuota(policyUsage, policyCfg);
+                    const permVerdict = validatePermissionRequest(lateMinsInput, policyUsage, policyCfg);
+                    const durationOptions: { mins: number; label: string }[] = [
+                      { mins: 30, label: "30 د (نصف ساعة)" },
+                      { mins: 45, label: "45 د" },
+                      { mins: 60, label: "60 د (ساعة)" },
+                      { mins: 75, label: "75 د (ساعة وربع)" },
+                      { mins: 90, label: "90 د (ساعة ونصف)" },
+                      { mins: 105, label: "105 د" },
+                      { mins: 120, label: "120 د (ساعتان - الحد الأقصى)" },
+                    ];
+                    return (
+                      <div dir="rtl" className="space-y-3 rounded-2xl border border-indigo-200 bg-indigo-50/50 p-4 dark:border-indigo-900/60 dark:bg-indigo-950/25">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-200/70 pb-2.5 dark:border-indigo-800/60">
+                          <div>
+                            <h4 className="text-xs font-extrabold text-indigo-950 dark:text-indigo-200">
+                              ⏱️ {exceptionType === "advance_late" ? "طلب إذن تأخير من الرصيد الشهري" : "طلب إذن انصراف مبكر من الرصيد الشهري"}
+                            </h4>
+                            <p className="text-[11px] text-indigo-800/80 dark:text-indigo-300/80">
+                              اختر مدة الإذن المطلوبة حسب رصيد أذوناتك المتاح (يتطلب موافقة الأدمن لاعتماده)
+                            </p>
+                          </div>
+                          <div className="rounded-xl bg-white px-3 py-1.5 text-[11px] font-bold text-indigo-900 shadow-sm dark:bg-zinc-900 dark:text-indigo-200">
+                            المتبقي: {toArabicDigits(permRem.count)} من {toArabicDigits(policyCfg.permissionMaxCount)} أذونات ·{" "}
+                            {toArabicDigits(permRem.minutes)} من {toArabicDigits(policyCfg.permissionMaxMinutes)} د
+                          </div>
                         </div>
-                      )}
+
+                        {/* Policy Rules Box */}
+                        <ul className="space-y-1 rounded-xl bg-white/80 p-3 text-[11px] leading-5 text-zinc-700 dark:bg-zinc-900/70 dark:text-zinc-300">
+                          <li>• <b>أهلية التقديم:</b> الأذونات الشهرية متاحة لجميع الموظفين بشكل طبيعي بدءاً من الشهر الأول (بما في ذلك أول 6 أشهر).</li>
+                          <li>• <b>الحد الأقصى الشهري:</b> 4 أذونات في الشهر فقط، بإجمالي لا يتجاوز 4 ساعات (240 دقيقة) شهرياً.</li>
+                          <li>• <b>المدد المسموح بها:</b> الحد الأدنى للإذن الواحد 30 دقيقة، والحد الأقصى ساعتان (120 دقيقة).</li>
+                          <li>• <b>احتساب تأخير البصمة (قاعدة الدقيقة الأولى):</b> أي تأخير ولو بدقيقة واحدة (مثل 11:01 بدلاً من 11:00) يُحتسب بحد أدنى نصف ساعة (30 دقيقة) وتُخصم من رصيد الساعات المتاح.</li>
+                          <li>• <b>موافقة الإدارة:</b> لا يُحتسب الإذن تلقائياً لوحده — يجب أن يوافق الأدمن على الطلب أولاً ليتم خصمه من رصيد الأذونات.</li>
+                        </ul>
+
+                        {/* Duration Picker Based on Available Balance */}
+                        <div>
+                          <label className="block text-xs font-bold text-zinc-800 dark:text-zinc-200 mb-1.5" htmlFor="lateMinutes">
+                            اختر مدة الإذن المطلوبة (حسب رصيدك المتاح: {toArabicDigits(permRem.minutes)} دقيقة) *
+                          </label>
+                          <div className="flex flex-wrap gap-1.5">
+                            {durationOptions.map((opt) => {
+                              const allowed = permRem.count > 0 && opt.mins <= permRem.minutes;
+                              const active = lateMinsInput === opt.mins;
+                              return (
+                                <button
+                                  key={opt.mins}
+                                  type="button"
+                                  onClick={() => setLateMinsInput(opt.mins)}
+                                  className={`rounded-xl border px-3 py-1.5 text-xs font-bold transition-all cursor-pointer ${
+                                    active
+                                      ? allowed
+                                        ? "border-indigo-600 bg-indigo-600 text-white shadow-sm"
+                                        : "border-red-600 bg-red-600 text-white shadow-sm"
+                                      : allowed
+                                        ? "border-indigo-200 bg-white text-indigo-900 hover:bg-indigo-100 dark:border-indigo-800 dark:bg-zinc-900 dark:text-indigo-200"
+                                        : "border-red-200 bg-red-50/60 text-red-700 opacity-75 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
+                                  }`}
+                                >
+                                  {opt.label} {!allowed ? " (يتجاوز الرصيد)" : ""}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <div className="mt-2 flex items-center gap-2">
+                            <input
+                              id="lateMinutes"
+                              name="lateMinutes"
+                              type="number"
+                              min={1}
+                              max={240}
+                              step={1}
+                              value={lateMinsInput}
+                              onChange={(e) => setLateMinsInput(Number(e.target.value) || 0)}
+                              required
+                              className="brutal-input bg-white dark:bg-zinc-900"
+                            />
+                            <span className="shrink-0 text-xs font-semibold text-zinc-600 dark:text-zinc-400">
+                              دقيقة (يُحتسب: {toArabicDigits(permVerdict.chargedMinutes)} د)
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* First-minute rule notice when input is 1..29 mins */}
+                        {lateMinsInput > 0 && lateMinsInput < policyCfg.permissionMinMinutes && permVerdict.ok && (
+                          <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs leading-5 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                            ℹ️ <b>تطبيق قاعدة الدقيقة الأولى:</b> المدة المدخلة ({toArabicDigits(lateMinsInput)} دقيقة) أقل من الحد الأدنى للإذن الواحد (30 دقيقة) — سيتم احتساب <b>{toArabicDigits(permVerdict.chargedMinutes)} دقيقة (نصف ساعة)</b> من رصيد الساعات المتاح عند موافقة الأدمن.
+                          </div>
+                        )}
+
+                        {/* Explicit Reason Why Worker Cannot Take Permission */}
+                        {!permVerdict.ok ? (
+                          <div className="rounded-xl border border-red-300 bg-red-50 p-3.5 text-xs leading-6 text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200">
+                            <b className="block text-sm text-red-800 dark:text-red-300 mb-0.5">
+                              ❌ سبب عدم إمكانية أخذ هذا الإذن:
+                            </b>
+                            <span>{permVerdict.reasonAr}</span>
+                          </div>
+                        ) : (
+                          <div className="rounded-xl border border-emerald-300 bg-emerald-50/90 p-3 text-xs leading-5 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200">
+                            ✓ <b>متاح للطلب ({toArabicDigits(permVerdict.chargedMinutes)} دقيقة):</b> سيتم إرسال الطلب للأدمن للموافقة، وعند اعتماده يتبقى لك{" "}
+                            <b>{toArabicDigits(Math.max(0, permRem.count - 1))} أذونات</b> و{" "}
+                            <b>{toArabicDigits(Math.max(0, permRem.minutes - permVerdict.chargedMinutes))} دقيقة</b> هذا الشهر.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {exceptionType === "late" && (
+                    <div className="space-y-2.5">
                       <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="lateMinutes">
-                        {exceptionType === "advance_late"
-                          ? "Expected Late Minutes on Target Day (مدة التأخير المتوقعة بالدقائق 15–180) *"
-                          : "Estimated Minutes Late (دقائق التأخير 15–180) *"}
+                        Estimated Minutes Late (دقائق التأخير الفعلية 1–180) *
                       </label>
                       <div className="flex flex-wrap gap-1.5">
-                        {[30, 60, 90, 120].map((m) => (
+                        {[15, 30, 60, 90, 120].map((m) => (
                           <button
                             key={m}
                             type="button"
@@ -2662,9 +2858,9 @@ export default function DashboardApp() {
                         id="lateMinutes"
                         name="lateMinutes"
                         type="number"
-                        min={15}
+                        min={1}
                         max={180}
-                        step={5}
+                        step={1}
                         value={lateMinsInput}
                         onChange={(e) => setLateMinsInput(Number(e.target.value) || 30)}
                         required
@@ -2735,117 +2931,240 @@ export default function DashboardApp() {
 
                   {["annual_leave", "unpaid_leave", "sick_leave", "emergency_leave"].includes(exceptionType) ? (
                     <div dir="rtl" className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50/60 p-4 dark:border-zinc-800 dark:bg-zinc-900/50">
-                      {exceptionType === "annual_leave" && leaveAccrual?.phase === "probation" && (
-                        <div className="rounded-xl border border-amber-300 bg-amber-50 p-3.5 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200 space-y-2">
-                          <p>
-                            ⚠️ أنت حاليًا في <strong>فترة الاختبار (حتى {leaveAccrual.probationEndsOn})</strong> — الإجازة السنوية المدفوعة تفتح بعد ٦ شهور، ويمكنك طلب <strong>إجازة بدون مرتب</strong> الآن:
-                          </p>
-                          <button
-                            type="button"
-                            onClick={() => setExceptionType("unpaid_leave")}
-                            className="rounded-lg bg-teal-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-teal-500 cursor-pointer"
-                          >
-                            📅 التبديل إلى طلب إجازة بدون مرتب (Unpaid Leave)
-                          </button>
-                        </div>
-                      )}
-
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                        <div>
-                          <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="exceptionDate">
-                            📅 تاريخ بداية الإجازة (Start Date) *
-                          </label>
-                          <input
-                            id="exceptionDate"
-                            name="exceptionDate"
-                            type="date"
-                            required
-                            value={leaveStartDate}
-                            onChange={(e) => {
-                              const nextStart = e.target.value;
-                              setLeaveStartDate(nextStart);
-                              const nextEnd = !leaveEndDate || leaveEndDate < nextStart ? nextStart : leaveEndDate;
-                              setLeaveEndDate(nextEnd);
-                              setLeaveDays(calcInclusiveDays(nextStart, nextEnd));
-                            }}
-                            className="brutal-input"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="endDate">
-                            📅 تاريخ نهاية الإجازة (End Date) *
-                          </label>
-                          <input
-                            id="endDate"
-                            name="endDate"
-                            type="date"
-                            required
-                            min={leaveStartDate}
-                            value={leaveEndDate}
-                            onChange={(e) => {
-                              const nextEnd = e.target.value;
-                              setLeaveEndDate(nextEnd);
-                              if (nextEnd >= leaveStartDate) {
-                                setLeaveDays(calcInclusiveDays(leaveStartDate, nextEnd));
-                              }
-                            }}
-                            className="brutal-input"
-                          />
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300" htmlFor="leaveDays">
-                            عدد أيام الإجازة (بمضاعفات نصف يوم) *
-                          </label>
-                          {leaveStartDate === leaveEndDate && (
-                            <div className="flex gap-1.5">
-                              {[0.5, 1].map((dVal) => (
-                                <button
-                                  key={dVal}
-                                  type="button"
-                                  onClick={() => setLeaveDays(dVal)}
-                                  className={`rounded-md border px-2 py-0.5 text-[11px] font-bold cursor-pointer ${
-                                    leaveDays === dVal
-                                      ? "border-emerald-600 bg-emerald-600 text-white"
-                                      : "border-zinc-300 bg-white text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-                                  }`}
-                                >
-                                  {dVal === 0.5 ? "نصف يوم (0.5)" : "يوم كامل (1)"}
-                                </button>
-                              ))}
+                      {(() => {
+                        const leaveVerdict = validateLeaveRequest(leaveAccrual, leaveDays);
+                        const noPaidLeaveBalance =
+                          leaveAccrual.phase === "probation" || leaveAccrual.requestableDays <= 0;
+                        const isAnnual = exceptionType === "annual_leave";
+                        return (
+                          <div className="space-y-2.5 rounded-xl border border-sky-200 bg-sky-50/50 p-3.5 text-xs dark:border-sky-900/60 dark:bg-sky-950/25">
+                            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-sky-200/70 pb-2 dark:border-sky-800/60">
+                              <span className="font-extrabold text-sky-950 dark:text-sky-200">
+                                🌴 رصيد إجازاتك السنوية · {leavePhaseLabelAr(leaveAccrual)}
+                              </span>
+                              <span className="rounded-lg bg-white px-2.5 py-1 text-[11px] font-bold text-sky-900 shadow-xs dark:bg-zinc-900 dark:text-sky-200">
+                                رصيدك المتاح للطلب: {toArabicDigits(leaveAccrual.requestableDays)} يوم (من إجمالي {toArabicDigits(leaveAccrual.balance)} يوم)
+                              </span>
                             </div>
-                          )}
-                        </div>
-                        <input
-                          id="leaveDays"
-                          name="leaveDays"
-                          type="number"
-                          min={0.5}
-                          max={30}
-                          step={0.5}
-                          value={leaveDays}
-                          onChange={(e) => {
-                            const val = Math.max(0.5, Number(e.target.value) || 1);
-                            setLeaveDays(val);
-                            if (val >= 1 && leaveStartDate) {
-                              setLeaveEndDate(addDaysYmd(leaveStartDate, Math.ceil(val) - 1));
-                            }
-                          }}
-                          required
-                          className="brutal-input"
-                        />
-                        <p className="mt-1 text-[11px] text-zinc-500">
-                          الفترة المختارة: من <strong className="font-mono">{leaveStartDate}</strong> إلى <strong className="font-mono">{leaveEndDate}</strong> ({leaveDays} يوم).
-                        </p>
-                      </div>
+
+                            <ul className="space-y-1 rounded-lg bg-white/80 p-2.5 text-[11px] leading-5 text-zinc-700 dark:bg-zinc-900/70 dark:text-zinc-300">
+                              {leaveAccrual.leaveLawType === "legacy_21" ? (
+                                <li>• <b>استحقاق السنة الأولى (قانون عمل قديم — ٢١ يوم):</b> بعد إتمام أول ٦ شهور ينزل في رصيدك <b>١٠٫٥ يوم</b>، ثم يزيد بمعدل <b>{toArabicDigits(policyCfg.leaveRateYear2)} يوم شهرياً</b> ليكتمل <b>٢١ يوماً</b> بنهاية أول سنة.</li>
+                              ) : (
+                                <li>• <b>استحقاق السنة الأولى:</b> بعد إتمام أول ٦ شهور ينزل في رصيدك <b>٧٫٥ يوم</b>، ثم يزيد بمعدل <b>{toArabicDigits(policyCfg.leaveRateYear1)} يوم شهرياً</b> ليكتمل <b>١٥ يوماً</b> بنهاية أول سنة.</li>
+                              )}
+                              <li>• <b>استحقاق ما بعد السنة الأولى:</b> يرتفع الرصيد إلى <b>٢١ يوماً في السنة (بواقع {toArabicDigits(policyCfg.leaveRateYear2)} يوم شهرياً)</b>، ويُضاف إليه <b>الرصيد المُرحّل قانونياً والمُعتمد من الإدارة</b>.</li>
+                            </ul>
+
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-[11px]">
+                              <div className="rounded-lg bg-white p-2 dark:bg-zinc-900">
+                                <div className="font-mono font-bold text-zinc-900 dark:text-white">{toArabicDigits(leaveAccrual.accruedDays)}</div>
+                                <div className="text-zinc-500">المستحق ({toArabicDigits(leaveAccrual.monthlyRate)}/ش)</div>
+                              </div>
+                              <div className="rounded-lg bg-emerald-50 p-2 dark:bg-emerald-950/40">
+                                <div className="font-mono font-bold text-emerald-800 dark:text-emerald-300">+{toArabicDigits(leaveAccrual.totalCarryOverDays)}</div>
+                                <div className="text-emerald-700 dark:text-emerald-400">مُرحّل ومعتمد</div>
+                              </div>
+                              <div className="rounded-lg bg-white p-2 dark:bg-zinc-900">
+                                <div className="font-mono font-bold text-zinc-900 dark:text-white">{toArabicDigits(leaveAccrual.usedDays)}</div>
+                                <div className="text-zinc-500">المستخدم والمعلق</div>
+                              </div>
+                              <div className="rounded-lg bg-sky-100/70 p-2 dark:bg-sky-950/50">
+                                <div className="font-mono font-bold text-sky-900 dark:text-sky-200">{toArabicDigits(leaveAccrual.requestableDays)}</div>
+                                <div className="text-sky-800 dark:text-sky-300">المتاح للطلب</div>
+                              </div>
+                            </div>
+
+                            {leaveAccrual.totalCarryOverDays > 0 && (
+                              <p className="text-[11px] text-emerald-800 dark:text-emerald-300">
+                                ✓ يشمل رصيدك <b>{toArabicDigits(leaveAccrual.totalCarryOverDays)} يوم</b> رصيد مُرحّل (مُرحّل قانونياً: {toArabicDigits(leaveAccrual.legalCarryOverDays)} يوم + مُعتمد من الإدارة: {toArabicDigits(leaveAccrual.carriedOverApproved)} يوم).
+                              </p>
+                            )}
+
+                            {isAnnual && (
+                              leaveAccrual.phase === "probation" ? (
+                                <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-xs text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200 space-y-2">
+                                  <p className="font-bold">
+                                    🚫 لا يمكنك إرسال طلب إجازة سنوية حالياً (رصيدك المتاح للطلب: ٠ يوم)
+                                  </p>
+                                  <p>
+                                    أنت حاليًا في <strong>فترة الاختبار (حتى {leaveAccrual.probationEndsOn})</strong> — رصيد الإجازات السنوية يفتح بعد إتمام أول ٦ شهور. يمكنك طلب <strong>إجازة بدون مرتب</strong> الآن:
+                                  </p>
+                                  <button
+                                    type="button"
+                                    onClick={() => setExceptionType("unpaid_leave")}
+                                    className="rounded-lg bg-teal-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-teal-500 cursor-pointer"
+                                  >
+                                    📅 التبديل إلى طلب إجازة بدون مرتب (Unpaid Leave)
+                                  </button>
+                                </div>
+                              ) : noPaidLeaveBalance ? (
+                                <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-xs text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200 space-y-2">
+                                  <p className="font-bold">
+                                    🚫 لا يمكنك إرسال طلب إجازة سنوية — رصيدك المتاح حالياً هو ٠ يوم
+                                  </p>
+                                  <p>
+                                    لقد استنفدت كامل رصيد إجازاتك السنوية المستحق حتى الآن ({toArabicDigits(leaveAccrual.accruedDays + leaveAccrual.totalCarryOverDays)} يوم مستحق، تم استخدام/حجز {toArabicDigits(leaveAccrual.usedDays)} يوم). يمكنك التبديل إلى طلب إجازة بدون مرتب:
+                                  </p>
+                                  <button
+                                    type="button"
+                                    onClick={() => setExceptionType("unpaid_leave")}
+                                    className="rounded-lg bg-teal-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-teal-500 cursor-pointer"
+                                  >
+                                    📅 التبديل إلى طلب إجازة بدون مرتب (Unpaid Leave)
+                                  </button>
+                                </div>
+                              ) : !leaveVerdict.ok ? (
+                                <div className="rounded-xl border border-red-300 bg-red-50 p-3 text-xs text-red-900 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200 space-y-2">
+                                  <p>
+                                    ❌ <b>لا يمكن طلب {toArabicDigits(leaveDays)} يوم إجازة سنوية:</b> {leaveVerdict.reasonAr}
+                                  </p>
+                                  {leaveAccrual.requestableDays > 0 && leaveDays > leaveAccrual.requestableDays && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const capped = leaveAccrual.requestableDays;
+                                        setLeaveDays(capped);
+                                        if (capped >= 1 && leaveStartDate) {
+                                          setLeaveEndDate(addDaysYmd(leaveStartDate, Math.ceil(capped) - 1));
+                                        }
+                                      }}
+                                      className="rounded-lg bg-red-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-600 cursor-pointer"
+                                    >
+                                      ✓ ضبط عدد الأيام إلى رصيدك المتاح ({toArabicDigits(leaveAccrual.requestableDays)} يوم)
+                                    </button>
+                                  )}
+                                </div>
+                              ) : (
+                                <div className="rounded-xl border border-emerald-300 bg-emerald-50/90 p-2.5 text-xs text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200">
+                                  ✓ <b>متاح للطلب ({toArabicDigits(leaveDays)} يوم):</b> رصيدك الحالي <b>{toArabicDigits(leaveAccrual.requestableDays)} يوم</b>، ويتبقى في رصيدك بعد الاعتماد <b>{toArabicDigits(Math.round((leaveAccrual.balance - leaveDays) * 100) / 100)} يوم</b>.
+                                </div>
+                              )
+                            )}
+                          </div>
+                        );
+                      })()}
+
+                      {(() => {
+                        const disableAnnualInputs =
+                          exceptionType === "annual_leave" &&
+                          (leaveAccrual.phase === "probation" || leaveAccrual.requestableDays <= 0);
+                        return (
+                          <>
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                              <div>
+                                <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="exceptionDate">
+                                  📅 تاريخ بداية الإجازة (Start Date) *
+                                </label>
+                                <input
+                                  id="exceptionDate"
+                                  name="exceptionDate"
+                                  type="date"
+                                  required
+                                  disabled={disableAnnualInputs}
+                                  value={leaveStartDate}
+                                  onChange={(e) => {
+                                    const nextStart = e.target.value;
+                                    setLeaveStartDate(nextStart);
+                                    const nextEnd = !leaveEndDate || leaveEndDate < nextStart ? nextStart : leaveEndDate;
+                                    setLeaveEndDate(nextEnd);
+                                    setLeaveDays(calcInclusiveDays(nextStart, nextEnd));
+                                  }}
+                                  className="brutal-input disabled:opacity-50 disabled:cursor-not-allowed"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="endDate">
+                                  📅 تاريخ نهاية الإجازة (End Date) *
+                                </label>
+                                <input
+                                  id="endDate"
+                                  name="endDate"
+                                  type="date"
+                                  required
+                                  disabled={disableAnnualInputs}
+                                  min={leaveStartDate}
+                                  value={leaveEndDate}
+                                  onChange={(e) => {
+                                    const nextEnd = e.target.value;
+                                    setLeaveEndDate(nextEnd);
+                                    if (nextEnd >= leaveStartDate) {
+                                      setLeaveDays(calcInclusiveDays(leaveStartDate, nextEnd));
+                                    }
+                                  }}
+                                  className="brutal-input disabled:opacity-50 disabled:cursor-not-allowed"
+                                />
+                              </div>
+                            </div>
+
+                            <div>
+                              <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1">
+                                <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300" htmlFor="leaveDays">
+                                  عدد أيام الإجازة (بمضاعفات نصف يوم)
+                                  {exceptionType === "annual_leave"
+                                    ? ` — الحد الأقصى المتاح لك: ${toArabicDigits(leaveAccrual.requestableDays)} يوم *`
+                                    : " *"}
+                                </label>
+                                {leaveStartDate === leaveEndDate && !disableAnnualInputs && (
+                                  <div className="flex gap-1.5">
+                                    {[0.5, 1]
+                                      .filter(
+                                        (dVal) =>
+                                          exceptionType !== "annual_leave" || dVal <= leaveAccrual.requestableDays
+                                      )
+                                      .map((dVal) => (
+                                        <button
+                                          key={dVal}
+                                          type="button"
+                                          onClick={() => setLeaveDays(dVal)}
+                                          className={`rounded-md border px-2 py-0.5 text-[11px] font-bold cursor-pointer ${
+                                            leaveDays === dVal
+                                              ? "border-emerald-600 bg-emerald-600 text-white"
+                                              : "border-zinc-300 bg-white text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                                          }`}
+                                        >
+                                          {dVal === 0.5 ? "نصف يوم (0.5)" : "يوم كامل (1)"}
+                                        </button>
+                                      ))}
+                                  </div>
+                                )}
+                              </div>
+                              <input
+                                id="leaveDays"
+                                name="leaveDays"
+                                type="number"
+                                min={0.5}
+                                max={
+                                  exceptionType === "annual_leave" && leaveAccrual.requestableDays > 0
+                                    ? leaveAccrual.requestableDays
+                                    : 30
+                                }
+                                step={0.5}
+                                disabled={disableAnnualInputs}
+                                value={leaveDays}
+                                onChange={(e) => {
+                                  const val = Math.max(0.5, Number(e.target.value) || 1);
+                                  setLeaveDays(val);
+                                  if (val >= 1 && leaveStartDate) {
+                                    setLeaveEndDate(addDaysYmd(leaveStartDate, Math.ceil(val) - 1));
+                                  }
+                                }}
+                                required
+                                className="brutal-input disabled:opacity-50 disabled:cursor-not-allowed"
+                              />
+                              <p className="mt-1 text-[11px] text-zinc-500">
+                                الفترة المختارة: من <strong className="font-mono">{leaveStartDate}</strong> إلى <strong className="font-mono">{leaveEndDate}</strong> ({leaveDays} يوم).
+                              </p>
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   ) : (
                     <div>
                       <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-1" htmlFor="exceptionDate">
-                        {exceptionType === "advance_late"
-                          ? "Target Date for Late Arrival (اليوم المحدد للتأخير) *"
+                        {exceptionType === "advance_late" || exceptionType === "early_permission"
+                          ? "تاريخ الإذن المطلوب (Target Date for Permission) *"
                           : "Effective Date (التاريخ) *"}
                       </label>
                       <input
@@ -2870,10 +3189,12 @@ export default function DashboardApp() {
                       rows={3}
                       placeholder={
                         exceptionType === "advance_late"
-                          ? "اكتب سبب التأخير المسبق والموعد المتوقع لوصولك في ذلك اليوم…"
-                          : exceptionType === "unpaid_leave"
-                            ? "اكتب سبب طلب الإجازة بدون مرتب…"
-                            : "Explain the reason for this exception request…"
+                          ? "اكتب سبب طلب إذن التأخير والموعد المتوقع لوصولك…"
+                          : exceptionType === "early_permission"
+                            ? "اكتب سبب طلب إذن الانصراف المبكر…"
+                            : exceptionType === "unpaid_leave"
+                              ? "اكتب سبب طلب الإجازة بدون مرتب…"
+                              : "Explain the reason for this exception request…"
                       }
                       className="brutal-input resize-none"
                     />
@@ -2892,13 +3213,45 @@ export default function DashboardApp() {
                     />
                   </div>
 
-                  <button
-                    type="submit"
-                    disabled={exceptionSubmitting}
-                    className="brutal-btn w-full"
-                  >
-                    {exceptionSubmitting ? "Sending…" : "Send request to HR"}
-                  </button>
+                  {(() => {
+                    const isPerm = exceptionType === "advance_late" || exceptionType === "early_permission";
+                    const permCheck = isPerm
+                      ? validatePermissionRequest(lateMinsInput, policyUsage, policyCfg)
+                      : null;
+                    const blockedByPerm = isPerm && permCheck && !permCheck.ok;
+
+                    const isAnnualLeave = exceptionType === "annual_leave";
+                    const leaveCheck = isAnnualLeave
+                      ? validateLeaveRequest(leaveAccrual, leaveDays)
+                      : null;
+                    const blockedByLeave =
+                      isAnnualLeave &&
+                      (leaveAccrual.phase === "probation" ||
+                        leaveAccrual.requestableDays <= 0 ||
+                        Boolean(leaveCheck && !leaveCheck.ok));
+
+                    return (
+                      <button
+                        type="submit"
+                        disabled={exceptionSubmitting || Boolean(blockedByPerm) || Boolean(blockedByLeave)}
+                        className="brutal-btn w-full disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {exceptionSubmitting
+                          ? "Sending…"
+                          : blockedByPerm
+                            ? "لا يمكن إرسال طلب الإذن (راجع السبب أعلاه)"
+                            : blockedByLeave
+                              ? leaveAccrual.requestableDays <= 0 || leaveAccrual.phase === "probation"
+                                ? `🚫 لا يمكن إرسال طلب إجازة سنوية (رصيدك المتاح: ٠ يوم)`
+                                : `🚫 المطلوب (${toArabicDigits(leaveDays)} يوم) يتجاوز رصيدك المتاح (${toArabicDigits(leaveAccrual.requestableDays)} يوم)`
+                              : isPerm
+                                ? `إرسال طلب الإذن (${permCheck?.chargedMinutes ?? 30} دقيقة) لموافقة الأدمن`
+                                : isAnnualLeave
+                                  ? `إرسال طلب إجازة سنوية (${toArabicDigits(leaveDays)} يوم من رصيدك: ${toArabicDigits(leaveAccrual.requestableDays)} يوم)`
+                                  : "Send request to HR"}
+                      </button>
+                    );
+                  })()}
                 </form>
               </div>
 

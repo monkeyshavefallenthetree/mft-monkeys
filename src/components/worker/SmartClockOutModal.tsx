@@ -6,7 +6,9 @@ import {
   evaluateEarlyLeave,
   formatHm,
   minutesOfDay,
+  remainingQuota,
   toArabicDigits,
+  validatePermissionRequest,
   type CycleUsage,
   type EarlyLeaveEvaluation,
   type Policy2026Config,
@@ -26,7 +28,7 @@ export type SmartClockOutChoice =
  * giving the worker clear choices:
  *   1. Submit Exception / Excuse to HR (طلب استثناء / عذر)
  *   2. Accept Lateness / Early-Leave Deduction (خصم على التأخير / عدم استكمال الساعات)
- *   3. Use Monthly Permission (استخدام إذن من الرصيد الشهري — بدون خصم)
+ *   3. Request Monthly Permission (طلب إذن من الرصيد الشهري — بانتظار موافقة الأدمن)
  *   4. Break — Return Later (استراحة — سأعود لاحقًا)
  */
 export default function SmartClockOutModal({
@@ -81,6 +83,13 @@ export default function SmartClockOutModal({
   const latePenaltyEgp = hasUnresolvedLate
     ? Math.round(latePenaltyDays * cfg.standardHours * hourlyRate * 100) / 100
     : 0;
+
+  const rem = remainingQuota(usage, cfg);
+  const targetMinsForPerm = ev.isEarly
+    ? ev.remainingMinutes
+    : lateEv?.lateMinutes || 30;
+  const permValidation = validatePermissionRequest(targetMinsForPerm, usage, cfg);
+  const canRequestPerm = ev.isEarly ? ev.canUsePermission : Boolean(lateEv?.covered);
 
   const secsLeft = Math.max(
     0,
@@ -169,14 +178,35 @@ export default function SmartClockOutModal({
                 {ev.isEarly && hasUnresolvedLate
                   ? `لديك تأخير (${toArabicDigits(lateEv!.lateMinutes)} د) ومتبقي ${toArabicDigits(ev.remainingMinutes)} دقيقة على نهاية الشيفت — اختر الإجراء المناسب:`
                   : ev.isEarly
-                    ? `متبقي ${toArabicDigits(ev.remainingMinutes)} دقيقة على نهاية الشيفت — هل تريد تقديم استثناء أو استهلاك إذن أو خصم التأخير؟`
+                    ? `متبقي ${toArabicDigits(ev.remainingMinutes)} دقيقة على نهاية الشيفت — هل تريد تقديم استثناء أو طلب إذن أو خصم التأخير؟`
                     : `لديك تأخير اليوم (${toArabicDigits(lateEv!.lateMinutes)} دقيقة) — هل تريد تقديم استثناء أو خصم على التأخير؟`}
               </h3>
+
+              {/* Permission Balance Summary */}
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-[11px] leading-5 text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800/60 dark:text-zinc-300">
+                <div className="flex items-center justify-between font-bold">
+                  <span>رصيد الأذونات الشهرية المتاح:</span>
+                  <span className="text-indigo-700 dark:text-indigo-300">
+                    {toArabicDigits(rem.count)} من {toArabicDigits(cfg.permissionMaxCount)} أذونات ·{" "}
+                    {toArabicDigits(rem.minutes)} د متبقية
+                  </span>
+                </div>
+              </div>
 
               {hasUnresolvedLate && (
                 <div className="rounded-2xl border border-amber-200 bg-amber-50/90 px-3.5 py-2.5 text-xs leading-5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
                   <b>تنبيه تأخير الحضور:</b> تأخرت {toArabicDigits(lateEv!.lateMinutes)} دقيقة (خصم{" "}
-                  {toArabicDigits(latePenaltyDays * cfg.standardHours)} ساعة ≈ {toArabicDigits(latePenaltyEgp.toFixed(2))} ج.م إن لم يُغطَّ بإذن أو استثناء).
+                  {toArabicDigits(latePenaltyDays * cfg.standardHours)} ساعة ≈ {toArabicDigits(latePenaltyEgp.toFixed(2))} ج.م إن لم يُغطَّ بإذن معتمد أو استثناء).
+                </div>
+              )}
+
+              {/* Explicit Reason Why Permission Cannot Be Taken */}
+              {!canRequestPerm && (
+                <div className="rounded-2xl border border-red-200 bg-red-50/90 px-3.5 py-2.5 text-xs leading-5 text-red-900 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-200">
+                  <b className="block text-red-800 dark:text-red-300">
+                    ❌ سبب عدم إمكانية طلب إذن شهري:
+                  </b>
+                  <span>{permValidation.reasonAr}</span>
                 </div>
               )}
 
@@ -223,11 +253,11 @@ export default function SmartClockOutModal({
                 </span>
               </button>
 
-              {/* Option 3: Use Monthly Permission */}
+              {/* Option 3: Request Monthly Permission (Requires Admin Approval) */}
               <button
                 type="button"
                 id="worker-smart-out-permission"
-                disabled={(!ev.canUsePermission && !(lateEv?.covered)) || busy}
+                disabled={!canRequestPerm || busy}
                 onClick={() => onChoose("permission", ev)}
                 className="flex w-full items-center gap-3 rounded-2xl border border-emerald-300 bg-emerald-50 p-3.5 text-right transition hover:-translate-y-0.5 hover:shadow-md disabled:pointer-events-none disabled:opacity-45 dark:border-emerald-800 dark:bg-emerald-950/30 cursor-pointer"
               >
@@ -236,14 +266,14 @@ export default function SmartClockOutModal({
                 </span>
                 <span className="flex-1">
                   <b className="block text-sm text-emerald-900 dark:text-emerald-200">
-                    استخدام إذن من الرصيد الشهري (بدون خصم)
+                    طلب إذن من الرصيد الشهري (بانتظار موافقة الأدمن)
                   </b>
                   <span className="text-xs text-emerald-800/80 dark:text-emerald-300/80">
                     {ev.canUsePermission
-                      ? `يُخصم ${toArabicDigits(ev.chargedMinutes)} دقيقة من رصيد الأذونات · المتبقي ${toArabicDigits(ev.remainingAfter.count)} أذونات`
+                      ? `طلب خصم ${toArabicDigits(ev.chargedMinutes)} دقيقة من رصيد الأذونات عند موافقة الإدارة · المتبقي بعدها ${toArabicDigits(ev.remainingAfter.count)} أذونات`
                       : lateEv?.covered
-                        ? `يُخصم ${toArabicDigits(lateEv.chargedMinutes)} دقيقة لتغطية التأخير من رصيد الأذونات`
-                        : "لا يمكن التغطية من رصيد الأذونات (تجاوز الحد الأقصى للإذن الواحد أو الرصيد)"}
+                        ? `طلب خصم ${toArabicDigits(lateEv.chargedMinutes)} دقيقة لتغطية التأخير من رصيد الأذونات عند موافقة الإدارة`
+                        : permValidation.reasonAr}
                   </span>
                 </span>
               </button>
