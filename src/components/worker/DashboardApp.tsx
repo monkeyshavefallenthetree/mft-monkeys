@@ -60,8 +60,11 @@ import FirebaseSetupWarning from "./FirebaseSetupWarning";
 import { toast, confirmDialog } from "@/lib/worker/feedback";
 import { useTheme, type Theme } from "@/lib/worker/theme";
 import {
+  addWorkingLeaveDaysYmd,
   chargeableMinutes,
   computeLeaveAccrual,
+  countWorkingLeaveDaysInRange,
+  effectiveLeaveDaysForRequest,
   evaluateClockIn,
   formatHm,
   isPolicy2026Active,
@@ -185,9 +188,17 @@ function formatHM(ms: number): string {
   return h ? `${h}h ${m}m` : `${m}m`;
 }
 
-function exceptionLabel(ex: ExceptionRow): string {
+function exceptionLabel(ex: ExceptionRow, weekendDays: number[] = [5, 6], holidays: HolidayItem[] = []): string {
   const mins = Number(ex.lateMinutes) || 0;
-  const days = Number(ex.leaveDays) || 1;
+  const days = effectiveLeaveDaysForRequest(
+    {
+      exceptionDate: ex.exceptionDate ? String(ex.exceptionDate) : undefined,
+      endDate: ex.endDate ? String(ex.endDate) : null,
+      leaveDays: ex.leaveDays != null ? Number(ex.leaveDays) : null,
+    },
+    weekendDays,
+    holidays,
+  );
   switch (ex.type) {
     case "late":
       return `Late Excuse (استثناء تأخير) · ${mins}m`;
@@ -1780,9 +1791,25 @@ export default function DashboardApp() {
       }
     }
     const leaveDaysRaw = fd.get("leaveDays");
-    const computedRangeDays = isLeave ? calcInclusiveDays(exceptionDate, endDate || exceptionDate) : 1;
-    const leaveDaysVal = leaveDaysRaw ? parseFloat(String(leaveDaysRaw)) : computedRangeDays;
+    const wkndDays = hrSettings.weekendDays || [5, 6];
+    const leaveRangeSummary = isLeave
+      ? countWorkingLeaveDaysInRange(exceptionDate, endDate || exceptionDate, wkndDays, holidays)
+      : null;
+    const computedRangeDays = isLeave && leaveRangeSummary ? leaveRangeSummary.workingDays : 1;
+    const parsedInputDays = leaveDaysRaw ? parseFloat(String(leaveDaysRaw)) : computedRangeDays;
+    const leaveDaysVal =
+      isLeave && leaveRangeSummary
+        ? leaveRangeSummary.workingDays === 0
+          ? 0
+          : exceptionDate === (endDate || exceptionDate) && parsedInputDays === 0.5
+            ? 0.5
+            : Math.min(parsedInputDays > 0 ? parsedInputDays : computedRangeDays, leaveRangeSummary.workingDays)
+        : parsedInputDays;
     if (isLeave) {
+      if (leaveRangeSummary && leaveRangeSummary.workingDays === 0) {
+        toast.warning("الأيام المختارة تقع بالكامل في عطلة نهاية الأسبوع الرسمية (الجمعة والسبت) أو إجازة رسمية ولا تُحتسب من الإجازات.");
+        return;
+      }
       if (!leaveDaysVal || leaveDaysVal < 0.5 || leaveDaysVal > 30) {
         toast.warning("يرجى تحديد عدد أيام الإجازة بشكل صحيح (من نصف يوم إلى 30 يومًا).");
         return;
@@ -1797,7 +1824,19 @@ export default function DashboardApp() {
             (x.type === "annual_leave" || x.type === "emergency_leave") &&
             (!x.status || x.status === "pending" || x.status === "approved"),
         )
-        .map((x) => ({ date: String(x.exceptionDate ?? ""), days: Number(x.leaveDays) || 1 }));
+        .map((x) => ({
+          date: String(x.exceptionDate ?? ""),
+          days: effectiveLeaveDaysForRequest(
+            {
+              exceptionDate: x.exceptionDate ? String(x.exceptionDate) : undefined,
+              endDate: x.endDate ? String(x.endDate) : null,
+              leaveDays: x.leaveDays != null ? Number(x.leaveDays) : null,
+            },
+            wkndDays,
+            holidays,
+          ),
+        }))
+        .filter((b) => b.days > 0);
       const acc = computeLeaveAccrual(
         hire,
         new Date(),
@@ -1987,7 +2026,19 @@ export default function DashboardApp() {
         (x.type === "annual_leave" || x.type === "emergency_leave") &&
         (!x.status || x.status === "pending" || x.status === "approved"),
     )
-    .map((x) => ({ date: String(x.exceptionDate ?? ""), days: Number(x.leaveDays) || 1 }));
+    .map((x) => ({
+      date: String(x.exceptionDate ?? ""),
+      days: effectiveLeaveDaysForRequest(
+        {
+          exceptionDate: x.exceptionDate ? String(x.exceptionDate) : undefined,
+          endDate: x.endDate ? String(x.endDate) : null,
+          leaveDays: x.leaveDays != null ? Number(x.leaveDays) : null,
+        },
+        hrSettings.weekendDays || [5, 6],
+        holidays,
+      ),
+    }))
+    .filter((b) => b.days > 0);
   const effectiveHire = hireFromProfile ?? hireFallback ?? todayYmd;
   const leaveAccrual = computeLeaveAccrual(
     effectiveHire,
@@ -2950,7 +3001,26 @@ export default function DashboardApp() {
                               type="button"
                               role="radio"
                               aria-checked={exceptionType === val}
-                              onClick={() => setExceptionType(val)}
+                              onClick={() => {
+                                setExceptionType(val);
+                                if (["annual_leave", "unpaid_leave", "sick_leave", "emergency_leave"].includes(val)) {
+                                  const wknd = hrSettings.weekendDays || [5, 6];
+                                  const curSum = countWorkingLeaveDaysInRange(
+                                    leaveStartDate,
+                                    leaveEndDate || leaveStartDate,
+                                    wknd,
+                                    holidays,
+                                  );
+                                  if (curSum.workingDays === 0) {
+                                    const nextWorkDay = addWorkingLeaveDaysYmd(leaveStartDate || localYmd(), 1, wknd, holidays);
+                                    setLeaveStartDate(nextWorkDay);
+                                    setLeaveEndDate(nextWorkDay);
+                                    setLeaveDays(1);
+                                  } else if (leaveEndDate > leaveStartDate) {
+                                    setLeaveDays(curSum.workingDays);
+                                  }
+                                }
+                              }}
                               className={`flex items-center gap-2 rounded-xl border p-2.5 text-xs font-semibold transition-all cursor-pointer ${
                                 exceptionType === val
                                   ? "border-red-500 bg-red-50 text-red-700 ring-2 ring-red-500/15 dark:border-red-500 dark:bg-red-950/40 dark:text-red-300 font-bold"
@@ -3358,6 +3428,13 @@ export default function DashboardApp() {
                         const disableAnnualInputs =
                           isPaidLeaveType &&
                           (leaveAccrual.phase === "probation" || leaveAccrual.requestableDays <= 0);
+                        const wkndDays = hrSettings.weekendDays || [5, 6];
+                        const rangeSummary = countWorkingLeaveDaysInRange(
+                          leaveStartDate,
+                          leaveEndDate || leaveStartDate,
+                          wkndDays,
+                          holidays,
+                        );
                         return (
                           <>
                             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -3377,7 +3454,8 @@ export default function DashboardApp() {
                                     setLeaveStartDate(nextStart);
                                     const nextEnd = !leaveEndDate || leaveEndDate < nextStart ? nextStart : leaveEndDate;
                                     setLeaveEndDate(nextEnd);
-                                    setLeaveDays(calcInclusiveDays(nextStart, nextEnd));
+                                    const sum = countWorkingLeaveDaysInRange(nextStart, nextEnd, wkndDays, holidays);
+                                    setLeaveDays(sum.workingDays);
                                   }}
                                   className="brutal-input disabled:opacity-50 disabled:cursor-not-allowed"
                                 />
@@ -3398,7 +3476,8 @@ export default function DashboardApp() {
                                     const nextEnd = e.target.value;
                                     setLeaveEndDate(nextEnd);
                                     if (nextEnd >= leaveStartDate) {
-                                      setLeaveDays(calcInclusiveDays(leaveStartDate, nextEnd));
+                                      const sum = countWorkingLeaveDaysInRange(leaveStartDate, nextEnd, wkndDays, holidays);
+                                      setLeaveDays(sum.workingDays);
                                     }
                                   }}
                                   className="brutal-input disabled:opacity-50 disabled:cursor-not-allowed"
@@ -3409,12 +3488,12 @@ export default function DashboardApp() {
                             <div>
                               <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1">
                                 <label className="block text-xs font-semibold text-zinc-700 dark:text-zinc-300" htmlFor="leaveDays">
-                                  عدد أيام الإجازة (بمضاعفات نصف يوم)
+                                  صافي أيام الإجازة المحتسبة (بدون الجمعة والسبت والإجازات الرسمية)
                                   {isPaidLeaveType
                                     ? ` — الحد الأقصى المتاح لك: ${toArabicDigits(leaveAccrual.requestableDays)} يوم *`
                                     : " *"}
                                 </label>
-                                {leaveStartDate === leaveEndDate && !disableAnnualInputs && (
+                                {leaveStartDate === leaveEndDate && rangeSummary.workingDays > 0 && !disableAnnualInputs && (
                                   <div className="flex gap-1.5">
                                     {[0.5, 1]
                                       .filter(
@@ -3442,7 +3521,7 @@ export default function DashboardApp() {
                                 id="leaveDays"
                                 name="leaveDays"
                                 type="number"
-                                min={0.5}
+                                min={0}
                                 max={
                                   isPaidLeaveType && leaveAccrual.requestableDays > 0
                                     ? leaveAccrual.requestableDays
@@ -3455,15 +3534,25 @@ export default function DashboardApp() {
                                   const val = Math.max(0.5, Number(e.target.value) || 1);
                                   setLeaveDays(val);
                                   if (val >= 1 && leaveStartDate) {
-                                    setLeaveEndDate(addDaysYmd(leaveStartDate, Math.ceil(val) - 1));
+                                    setLeaveEndDate(addWorkingLeaveDaysYmd(leaveStartDate, Math.ceil(val), wkndDays, holidays));
                                   }
                                 }}
                                 required
                                 className="brutal-input disabled:opacity-50 disabled:cursor-not-allowed"
                               />
                               <p className="mt-1 text-[11px] text-zinc-500">
-                                الفترة المختارة: من <strong className="font-mono">{leaveStartDate}</strong> إلى <strong className="font-mono">{leaveEndDate}</strong> ({leaveDays} يوم).
+                                الفترة المختارة: من <strong className="font-mono">{leaveStartDate}</strong> إلى <strong className="font-mono">{leaveEndDate}</strong> — صافي المحتسب: <strong>{toArabicDigits(leaveDays)} يوم عمل</strong>.
                               </p>
+                              {rangeSummary.excludedDaysCount > 0 && rangeSummary.workingDays > 0 && (
+                                <p dir="rtl" className="mt-1.5 rounded-lg border border-emerald-200 bg-emerald-50/70 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-300">
+                                  ✅ تم استبعاد <strong>{toArabicDigits(rangeSummary.excludedDaysCount)} يوم</strong> عطلة رسمية (الجمعة والسبت / إجازات رسمية) تلقائياً من الفترة ({toArabicDigits(rangeSummary.totalCalendarDays)} أيام تقويمية ← يُحسب <strong>{toArabicDigits(leaveDays)} يوم</strong> فقط من رصيد الإجازات).
+                                </p>
+                              )}
+                              {rangeSummary.totalCalendarDays > 0 && rangeSummary.workingDays === 0 && (
+                                <p dir="rtl" className="mt-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] font-bold text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+                                  ⚠️ جميع الأيام المختارة تقع في العطلة الأسبوعية الرسمية (الجمعة والسبت) أو إجازة رسمية، لذلك لا تُحتسب ولا تُخصم من رصيد الإجازات — اختر أيام عمل فعلية.
+                                </p>
+                              )}
                             </div>
                           </>
                         );
@@ -3535,6 +3624,17 @@ export default function DashboardApp() {
                       : null;
                     const blockedByPerm = isPerm && permCheck && !permCheck.ok;
 
+                    const isAnyLeave = ["annual_leave", "unpaid_leave", "sick_leave", "emergency_leave"].includes(exceptionType);
+                    const leaveRangeSum = isAnyLeave
+                      ? countWorkingLeaveDaysInRange(
+                          leaveStartDate,
+                          leaveEndDate || leaveStartDate,
+                          hrSettings.weekendDays || [5, 6],
+                          holidays,
+                        )
+                      : null;
+                    const blockedByOfficialWeekend = Boolean(isAnyLeave && leaveRangeSum && leaveRangeSum.workingDays <= 0);
+
                     const isPaidLeave =
                       exceptionType === "annual_leave" || exceptionType === "emergency_leave";
                     const leaveCheck = isPaidLeave
@@ -3559,6 +3659,7 @@ export default function DashboardApp() {
                         disabled={
                           exceptionSubmitting ||
                           Boolean(blockedByPerm) ||
+                          Boolean(blockedByOfficialWeekend) ||
                           Boolean(blockedByLeave) ||
                           Boolean(blockedByAdv)
                         }
@@ -3568,17 +3669,19 @@ export default function DashboardApp() {
                           ? "Sending…"
                           : blockedByPerm
                             ? "🚫 لا يمكن إرسال طلب الإذن (راجع السبب والرصيد أعلاه)"
-                            : blockedByLeave
-                              ? leaveAccrual.requestableDays <= 0 || leaveAccrual.phase === "probation"
-                                ? `🚫 لا يمكن إرسال الطلب (رصيد إجازاتك المتاح: ٠ يوم)`
-                                : `🚫 المطلوب (${toArabicDigits(leaveDays)} يوم) يتجاوز رصيدك المتاح (${toArabicDigits(leaveAccrual.requestableDays)} يوم)`
-                              : blockedByAdv
-                                ? "🚫 مبلغ السلفة يتجاوز المتبقي من راتبك المسجل"
-                                : isPerm
-                                  ? `إرسال طلب الإذن (${permCheck?.chargedMinutes ?? 30} دقيقة من رصيد الأذونات) لموافقة الأدمن`
-                                  : isPaidLeave
-                                    ? `إرسال طلب الإجازة (${toArabicDigits(leaveDays)} يوم من رصيدك: ${toArabicDigits(leaveAccrual.requestableDays)} يوم)`
-                                    : "Send request to HR"}
+                            : blockedByOfficialWeekend
+                              ? "🚫 الأيام المختارة عطلة رسمية (جمعة/سبت) لا تُحسب من الإجازات"
+                              : blockedByLeave
+                                ? leaveAccrual.requestableDays <= 0 || leaveAccrual.phase === "probation"
+                                  ? `🚫 لا يمكن إرسال الطلب (رصيد إجازاتك المتاح: ٠ يوم)`
+                                  : `🚫 المطلوب (${toArabicDigits(leaveDays)} يوم) يتجاوز رصيدك المتاح (${toArabicDigits(leaveAccrual.requestableDays)} يوم)`
+                                : blockedByAdv
+                                  ? "🚫 مبلغ السلفة يتجاوز المتبقي من راتبك المسجل"
+                                  : isPerm
+                                    ? `إرسال طلب الإذن (${permCheck?.chargedMinutes ?? 30} دقيقة من رصيد الأذونات) لموافقة الأدمن`
+                                    : isPaidLeave
+                                      ? `إرسال طلب الإجازة (${toArabicDigits(leaveDays)} يوم من رصيدك: ${toArabicDigits(leaveAccrual.requestableDays)} يوم)`
+                                      : "Send request to HR"}
                       </button>
                     );
                   })()}

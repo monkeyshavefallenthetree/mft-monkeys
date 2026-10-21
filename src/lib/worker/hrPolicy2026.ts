@@ -967,7 +967,13 @@ export function validateLeaveRequest(
       reasonAr: `لا يمكنك إرسال طلب إجازة سنوية لأن رصيدك المتاح حالياً هو (٠ يوم) — لا يُسمح بالرصيد السالب.`,
     };
   }
-  if (!(requestedDays > 0) || Math.round(requestedDays * 2) !== requestedDays * 2) {
+  if (!(requestedDays > 0)) {
+    return {
+      ok: false,
+      reasonAr: "الأيام المختارة تقع بالكامل في عطلة نهاية الأسبوع الرسمية (الجمعة والسبت) أو إجازة رسمية ولا تُخصم من رصيد الإجازات.",
+    };
+  }
+  if (Math.round(requestedDays * 2) !== requestedDays * 2) {
     return { ok: false, reasonAr: "يجب أن تكون مدة الإجازة بمضاعفات نصف يوم." };
   }
   if (requestedDays > accrual.requestableDays) {
@@ -977,6 +983,158 @@ export function validateLeaveRequest(
     };
   }
   return { ok: true };
+}
+
+export interface WorkingLeaveRangeSummary {
+  totalCalendarDays: number;
+  workingDays: number;
+  weekendDaysCount: number;
+  holidayDaysCount: number;
+  excludedDaysCount: number;
+}
+
+/**
+ * Counts working days inside [startYmd, endYmd] (inclusive), automatically excluding
+ * weekly rest days (default Friday=5 & Saturday=6) and official holidays so official
+ * off-days are NEVER deducted from a worker's leave balance.
+ */
+export function countWorkingLeaveDaysInRange(
+  startYmd: string,
+  endYmd: string,
+  weekendDays: number[] = [5, 6],
+  holidays: Array<string | { date: string; endDate?: string }> = [],
+): WorkingLeaveRangeSummary {
+  if (!startYmd || !endYmd) {
+    return { totalCalendarDays: 0, workingDays: 0, weekendDaysCount: 0, holidayDaysCount: 0, excludedDaysCount: 0 };
+  }
+  const s = parseYmd(startYmd);
+  const e = parseYmd(endYmd);
+  if (!s || !e || e < s) {
+    return { totalCalendarDays: 0, workingDays: 0, weekendDaysCount: 0, holidayDaysCount: 0, excludedDaysCount: 0 };
+  }
+  const holidaySet = new Set<string>();
+  for (const h of holidays) {
+    if (typeof h === "string") {
+      holidaySet.add(h);
+    } else if (h && h.date) {
+      if (!h.endDate || h.endDate === h.date) {
+        holidaySet.add(h.date);
+      } else {
+        const curH = parseYmd(h.date);
+        const endH = parseYmd(h.endDate);
+        if (curH && endH) {
+          while (curH <= endH) {
+            holidaySet.add(ymd(curH));
+            curH.setDate(curH.getDate() + 1);
+          }
+        }
+      }
+    }
+  }
+
+  let totalCalendarDays = 0;
+  let workingDays = 0;
+  let weekendDaysCount = 0;
+  let holidayDaysCount = 0;
+  const cur = new Date(s.getFullYear(), s.getMonth(), s.getDate(), 12, 0, 0);
+  const endAt = new Date(e.getFullYear(), e.getMonth(), e.getDate(), 12, 0, 0);
+
+  while (cur <= endAt) {
+    totalCalendarDays++;
+    const curStr = ymd(cur);
+    const isWknd = weekendDays.includes(cur.getDay());
+    const isHol = holidaySet.has(curStr);
+    if (isWknd) {
+      weekendDaysCount++;
+    } else if (isHol) {
+      holidayDaysCount++;
+    } else {
+      workingDays++;
+    }
+    cur.setDate(cur.getDate() + 1);
+  }
+
+  return {
+    totalCalendarDays,
+    workingDays,
+    weekendDaysCount,
+    holidayDaysCount,
+    excludedDaysCount: weekendDaysCount + holidayDaysCount,
+  };
+}
+
+/**
+ * Advances from `startYmd` by `workingDaysNeeded` working days (skipping Fridays, Saturdays, and official holidays)
+ * and returns the resulting `endYmd`.
+ */
+export function addWorkingLeaveDaysYmd(
+  startYmd: string,
+  workingDaysNeeded: number,
+  weekendDays: number[] = [5, 6],
+  holidays: Array<string | { date: string; endDate?: string }> = [],
+): string {
+  const s = parseYmd(startYmd);
+  if (!s) return startYmd;
+  const target = Math.max(1, Math.ceil(workingDaysNeeded));
+  const holidaySet = new Set<string>();
+  for (const h of holidays) {
+    if (typeof h === "string") {
+      holidaySet.add(h);
+    } else if (h && h.date) {
+      if (!h.endDate || h.endDate === h.date) {
+        holidaySet.add(h.date);
+      } else {
+        const curH = parseYmd(h.date);
+        const endH = parseYmd(h.endDate);
+        if (curH && endH) {
+          while (curH <= endH) {
+            holidaySet.add(ymd(curH));
+            curH.setDate(curH.getDate() + 1);
+          }
+        }
+      }
+    }
+  }
+  const cur = new Date(s.getFullYear(), s.getMonth(), s.getDate(), 12, 0, 0);
+  let counted = 0;
+  let safety = 0;
+  while (safety < 366) {
+    safety++;
+    const curStr = ymd(cur);
+    const isOff = weekendDays.includes(cur.getDay()) || holidaySet.has(curStr);
+    if (!isOff) {
+      counted++;
+      if (counted >= target) return curStr;
+    }
+    cur.setDate(cur.getDate() + 1);
+  }
+  return ymd(cur);
+}
+
+/**
+ * Computes the effective chargeable leave days for a stored/pending leave request,
+ * ensuring Fridays, Saturdays, and official holidays in [exceptionDate, endDate] are never charged.
+ */
+export function effectiveLeaveDaysForRequest(
+  req: { exceptionDate?: string; endDate?: string | null; leaveDays?: number | null },
+  weekendDays: number[] = [5, 6],
+  holidays: Array<string | { date: string; endDate?: string }> = [],
+): number {
+  const start = String(req.exceptionDate || "");
+  const end = String(req.endDate || start);
+  const rawDays = Number(req.leaveDays);
+  if (!start) return rawDays > 0 ? rawDays : 1;
+  if (end > start) {
+    const summary = countWorkingLeaveDaysInRange(start, end, weekendDays, holidays);
+    if (summary.workingDays === 0) return 0;
+    if (rawDays > 0 && rawDays < summary.workingDays) return rawDays;
+    return summary.workingDays;
+  }
+  const singleSummary = countWorkingLeaveDaysInRange(start, start, weekendDays, holidays);
+  if (singleSummary.workingDays === 0) return 0;
+  if (!req.endDate && rawDays > 1) return rawDays;
+  if (rawDays === 0.5) return 0.5;
+  return 1;
 }
 
 /* ────────────────────────────── Overtime ────────────────────────────── */
