@@ -31,6 +31,7 @@ const UNCOVERED_REASON_EN: Record<UncoveredReason, string> = {
 export default function SmartLateClockInModal({
   clockIn,
   usage,
+  dailyUsedMinutes = 0,
   cfg,
   hourlyRate,
   busy,
@@ -40,6 +41,7 @@ export default function SmartLateClockInModal({
 }: {
   clockIn: Date;
   usage: CycleUsage;
+  dailyUsedMinutes?: number;
   cfg: Policy2026Config;
   hourlyRate: number;
   busy?: boolean;
@@ -57,8 +59,15 @@ export default function SmartLateClockInModal({
   const t = (arText: string, enText: string) => (isAr ? arText : enText);
   const fmt = (v: number | string) => (isAr ? toArabicDigits(v) : String(v));
 
-  const ev = evaluateClockIn(clockIn, usage, cfg);
-  const permVerdict = validatePermissionRequest(ev.lateMinutes, usage, cfg);
+  const evRaw = evaluateClockIn(clockIn, usage, cfg);
+  const permVerdict = validatePermissionRequest(evRaw.lateMinutes, usage, cfg, {
+    dailyUsedMinutes,
+    dailyUsedCount: dailyUsedMinutes > 0 ? 1 : 0,
+    sameKindAlreadyBooked: false,
+  });
+  const ev: ClockInEvaluation = permVerdict.ok
+    ? evRaw
+    : { ...evRaw, covered: false, chargedMinutes: 0 };
   const remNow = remainingQuota(usage, cfg);
   const isVeryLate = parseHm(ev.clockInHm) > parseHm(cfg.veryLateCutoffTime);
   const penaltyDays: 0.25 | 0.5 =

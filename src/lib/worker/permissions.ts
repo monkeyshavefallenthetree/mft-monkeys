@@ -8,7 +8,7 @@
 import {
   collection,
   doc,
-  getDoc,
+  getDocs,
   onSnapshot,
   query,
   serverTimestamp,
@@ -56,6 +56,27 @@ export function subscribeCycleLedger(
 type WorkerInfo = { uid: string; name: string; email?: string };
 
 /**
+ * Look up an existing permissionLedger document owned by `workerId` using a single-field
+ * `where("workerId", "==", workerId)` query instead of `getDoc(ref)`.
+ * Why: Firestore security rules (`ownsExisting()`) evaluate `resource.data.workerId == request.auth.uid`,
+ * which throws a permission-denied error on `getDoc(ref)` when the document does not exist yet (`resource == null`).
+ */
+async function findExistingWorkerLedgerEntry(
+  db: Firestore,
+  workerId: string,
+  entryId: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const snap = await getDocs(query(collection(db, "permissionLedger"), where("workerId", "==", workerId)));
+    const found = snap.docs.find((d) => d.id === entryId);
+    return found ? (found.data() as Record<string, unknown>) : null;
+  } catch (e) {
+    console.warn("[permissions] findExistingWorkerLedgerEntry fallback:", e);
+    return null;
+  }
+}
+
+/**
  * Records the worker's choice for today's late clock-in: use a monthly permission
  * (`usePermission: true`) or accept the salary deduction (`false`).
  *
@@ -79,7 +100,8 @@ export async function chargeLatePermission(
   },
 ): Promise<boolean> {
   if (ev.status === "on-time") return false;
-  const ref = doc(db, "permissionLedger", ledgerId(worker.uid, date, "late"));
+  const entryId = ledgerId(worker.uid, date, "late");
+  const ref = doc(db, "permissionLedger", entryId);
   const wantPermission = opts?.usePermission ?? true;
   const covered = wantPermission && ev.covered;
   const fallbackPenaltyDays: 0 | 0.25 | 0.5 = covered
@@ -92,10 +114,9 @@ export async function chargeLatePermission(
     uncoveredReason: covered ? null : ev.uncoveredReason ?? "declined",
   };
 
-  const existing = await getDoc(ref);
-  if (existing.exists()) {
+  const cur = await findExistingWorkerLedgerEntry(db, worker.uid, entryId);
+  if (cur) {
     if (!opts?.overwrite) return false;
-    const cur = existing.data();
     if (cur.source === "admin" || cur.status !== "applied" || cur.reversedBy || cur.reappliedBy) {
       throw new Error("This entry was set by HR and can no longer be changed.");
     }
@@ -172,8 +193,13 @@ export async function chargeEarlyLeave(
   usePermission: boolean,
   requiredEndHm: string,
 ): Promise<void> {
+  const entryId = ledgerId(worker.uid, date, "early");
+  const cur = await findExistingWorkerLedgerEntry(db, worker.uid, entryId);
+  if (cur && (cur.source === "admin" || cur.reversedBy || cur.reappliedBy)) {
+    return;
+  }
   const covered = usePermission && ev.canUsePermission;
-  await setDoc(doc(db, "permissionLedger", ledgerId(worker.uid, date, "early")), {
+  await setDoc(doc(db, "permissionLedger", entryId), {
     workerId: worker.uid,
     workerName: worker.name,
     workerEmail: worker.email ?? "",
@@ -214,10 +240,11 @@ export async function chargeEarlyLeave(
  * (The next clock-out re-evaluates against the required end.)
  */
 export async function reverseEarlyLeaveOnReturn(db: Firestore, workerId: string, date: string): Promise<void> {
-  const ref = doc(db, "permissionLedger", ledgerId(workerId, date, "early"));
+  const entryId = ledgerId(workerId, date, "early");
+  const ref = doc(db, "permissionLedger", entryId);
   try {
-    const snap = await getDoc(ref);
-    if (!snap.exists() || snap.data().status !== "applied") return;
+    const cur = await findExistingWorkerLedgerEntry(db, workerId, entryId);
+    if (!cur || cur.status !== "applied" || cur.source === "admin" || cur.reversedBy || cur.reappliedBy) return;
     await updateDoc(ref, { status: "reversed", reversedReason: "returned_same_day", reversedAt: serverTimestamp() });
   } catch (e) {
     console.warn("[permissions] could not reverse early leave:", e);

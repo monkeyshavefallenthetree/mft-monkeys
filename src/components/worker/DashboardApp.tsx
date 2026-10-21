@@ -808,6 +808,26 @@ export default function DashboardApp() {
           const dateYmd = localYmd(ws.startTime);
 
           if (ev.isEarly) {
+            if (choice === "permission" && ev.canUsePermission) {
+              const alreadyBookedEarly = exceptions.some(
+                (x) =>
+                  x.type === "early_permission" &&
+                  String(x.exceptionDate || "") === dateYmd &&
+                  (!x.status || x.status === "pending" || x.status === "approved"),
+              );
+              if (!alreadyBookedEarly) {
+                await submitException(fb.db, {
+                  workerId: uid,
+                  workerName: wName,
+                  workerEmail: profile?.email ?? "",
+                  type: "early_permission",
+                  lateMinutes: ev.chargedMinutes,
+                  exceptionDate: dateYmd,
+                  reason: `[طلب إذن انصراف مبكر (${ev.remainingMinutes} د متبقية ← ${ev.chargedMinutes} د من الرصيد الشهري)] بانتظار موافقة الأدمن`,
+                  supportingEvidence: null,
+                });
+              }
+            }
             // Do NOT count permission automatically by itself — record covered: false until Admin approves
             await chargeEarlyLeave(
               fb.db,
@@ -817,24 +837,32 @@ export default function DashboardApp() {
               ev,
               false,
               formatHm(minutesOfDay(ctx.requiredEnd)),
+            ).catch((err) => console.warn("[early leave ledger]", err));
+          }
+
+          // Also record late arrival decision if the worker clocked in late today and hasn't recorded it yet
+          const hasLateEntry = effectiveLedger.some((e) => e.date === dateYmd && e.kind === "late" && e.status === "applied");
+          const lateEv = evaluateClockIn(ws.startTime, policyRef.current.usage, policyRef.current.cfg);
+          if (choice === "permission" && !ev.isEarly && lateEv.status !== "on-time" && lateEv.covered) {
+            const alreadyBookedLate = exceptions.some(
+              (x) =>
+                x.type === "advance_late" &&
+                String(x.exceptionDate || "") === dateYmd &&
+                (!x.status || x.status === "pending" || x.status === "approved"),
             );
-            if (choice === "permission" && ev.canUsePermission) {
+            if (!alreadyBookedLate) {
               await submitException(fb.db, {
                 workerId: uid,
                 workerName: wName,
                 workerEmail: profile?.email ?? "",
-                type: "early_permission",
-                lateMinutes: ev.chargedMinutes,
+                type: "advance_late",
+                lateMinutes: lateEv.chargedMinutes,
                 exceptionDate: dateYmd,
-                reason: `[طلب إذن انصراف مبكر (${ev.remainingMinutes} د متبقية ← ${ev.chargedMinutes} د من الرصيد الشهري)] بانتظار موافقة الأدمن`,
+                reason: `[طلب إذن تأخير صباحي (${lateEv.lateMinutes} د فعلي ← ${lateEv.chargedMinutes} د من الرصيد الشهري)] بانتظار موافقة الأدمن`,
                 supportingEvidence: null,
               });
             }
           }
-
-          // Also record late arrival decision if the worker clocked in late today and hasn't recorded it yet
-          const hasLateEntry = ledger.some((e) => e.date === dateYmd && e.kind === "late" && e.status === "applied");
-          const lateEv = evaluateClockIn(ws.startTime, policyRef.current.usage, policyRef.current.cfg);
           if (!hasLateEntry && lateEv.status !== "on-time") {
             const penaltyDays: 0.25 | 0.5 = lateEv.fallbackPenaltyDays === 0.5 ? 0.5 : 0.25;
             await chargeLatePermission(
@@ -849,18 +877,6 @@ export default function DashboardApp() {
                 overwrite: true,
               },
             ).catch(() => {});
-          }
-          if (choice === "permission" && !ev.isEarly && lateEv.status !== "on-time" && lateEv.covered) {
-            await submitException(fb.db, {
-              workerId: uid,
-              workerName: wName,
-              workerEmail: profile?.email ?? "",
-              type: "advance_late",
-              lateMinutes: lateEv.chargedMinutes,
-              exceptionDate: dateYmd,
-              reason: `[طلب إذن تأخير صباحي (${lateEv.lateMinutes} د فعلي ← ${lateEv.chargedMinutes} د من الرصيد الشهري)] بانتظار موافقة الأدمن`,
-              supportingEvidence: null,
-            });
           }
         } catch (e) {
           console.error("early leave ledger failed", e);
@@ -882,7 +898,7 @@ export default function DashboardApp() {
       if (ctx.mode === "logout") void handleLogout({ silent: true });
       else void clockOut({ silent: true, reason });
     },
-    [smartOut, uid, profile, hrSettings.monthStartDay, ledger, handleLogout, clockOut, setTab],
+    [smartOut, uid, profile, hrSettings.monthStartDay, effectiveLedger, exceptions, handleLogout, clockOut, setTab],
   );
 
   /** Resolves the HR-POL-2026 smart late clock-in choice (request permission vs. salary deduction). */
@@ -891,39 +907,72 @@ export default function DashboardApp() {
       const ctx = smartLateIn;
       const fb = getFirebase();
       if (!ctx || !fb || !uid || !profile) return;
-      setSmartBusy(true);
-      try {
-        const date = localYmd(ctx.clockIn);
+      const date = localYmd(ctx.clockIn);
+      const storageKey = `mft_late_choice_${uid}_${date}`;
+
+      if (choice === "excuse") {
+        sessionStorage.setItem(storageKey, "excuse");
+        setSmartLateIn(null);
+        setExceptionType("late");
+        setLateMinsInput(Math.min(180, Math.max(1, ev.lateMinutes || 30)));
+        setTab("exceptions");
+        playTerminalBeep();
+        toast.info("تم فتح نموذج طلب استثناء", {
+          description: "اكتب سبب التأخير القهري لإرساله إلى الموارد البشرية.",
+        });
         const range = getPayrollCycleRange(ctx.clockIn, hrSettings.monthStartDay);
         const name = `${profile.firstName ?? ""} ${profile.lastName ?? ""}`.trim() || (profile.email ?? "Worker");
-        const wantsPermission = choice === "permission" && ev.covered;
-        // Record lateness with usePermission: false initially — permission is NEVER counted until Admin approves!
-        await chargeLatePermission(fb.db, { uid, name, email: profile.email }, date, range.startYmd, ev, {
+        void chargeLatePermission(fb.db, { uid, name, email: profile.email }, date, range.startYmd, ev, {
           usePermission: false,
           penaltyDays,
           overwrite: true,
-        });
+        }).catch((err) => console.warn("[late choice excuse ledger]", err));
+        return;
+      }
+
+      setSmartBusy(true);
+      try {
+        const range = getPayrollCycleRange(ctx.clockIn, hrSettings.monthStartDay);
+        const name = `${profile.firstName ?? ""} ${profile.lastName ?? ""}`.trim() || (profile.email ?? "Worker");
+        const wantsPermission = choice === "permission" && ev.covered;
+
         if (wantsPermission) {
-          await submitException(fb.db, {
-            workerId: uid,
-            workerName: name,
-            workerEmail: profile.email ?? "",
-            type: "advance_late",
-            lateMinutes: ev.chargedMinutes,
-            exceptionDate: date,
-            reason: `[طلب إذن تأخير صباحي (${ev.lateMinutes} د فعلي ← ${ev.chargedMinutes} د من الرصيد الشهري)] بانتظار موافقة الأدمن`,
-            supportingEvidence: null,
-          });
+          const alreadyBooked = exceptions.some(
+            (x) =>
+              x.type === "advance_late" &&
+              String(x.exceptionDate || "") === date &&
+              (!x.status || x.status === "pending" || x.status === "approved"),
+          );
+          if (!alreadyBooked) {
+            await submitException(fb.db, {
+              workerId: uid,
+              workerName: name,
+              workerEmail: profile.email ?? "",
+              type: "advance_late",
+              lateMinutes: ev.chargedMinutes,
+              exceptionDate: date,
+              reason: `[طلب إذن تأخير صباحي (${ev.lateMinutes} د فعلي ← ${ev.chargedMinutes} د من الرصيد الشهري)] بانتظار موافقة الأدمن`,
+              supportingEvidence: null,
+            });
+          }
+          // Record lateness with usePermission: false initially — permission is counted in live quota via exceptionRequests & confirmed by Admin
+          await chargeLatePermission(fb.db, { uid, name, email: profile.email }, date, range.startYmd, ev, {
+            usePermission: false,
+            penaltyDays,
+            overwrite: true,
+          }).catch((err) => console.warn("[late choice permission ledger]", err));
+        } else {
+          await chargeLatePermission(fb.db, { uid, name, email: profile.email }, date, range.startYmd, ev, {
+            usePermission: false,
+            penaltyDays,
+            overwrite: true,
+          }).catch((err) => console.warn("[late choice deduct ledger]", err));
         }
+
+        sessionStorage.setItem(storageKey, wantsPermission ? "permission" : "deduct");
         playTerminalBeep();
         setSmartLateIn(null);
-        if (choice === "excuse") {
-          setExceptionType("late");
-          setTab("exceptions");
-          toast.info("تم فتح نموذج طلب استثناء", {
-            description: "اكتب سبب التأخير القهري لإرساله إلى الموارد البشرية.",
-          });
-        } else if (wantsPermission) {
+        if (wantsPermission) {
           toast.success("تم إرسال طلب إذن التأخير للأدمن للموافقة ⏳", {
             description: `تم طلب خصم ${ev.chargedMinutes} دقيقة من رصيد الأذونات الشهري. لن يُحتسب الإذن تلقائياً إلا بعد موافقة الإدارة.`,
             duration: 8000,
@@ -950,7 +999,7 @@ export default function DashboardApp() {
         setSmartBusy(false);
       }
     },
-    [smartLateIn, uid, profile, hrSettings.monthStartDay, setTab],
+    [smartLateIn, uid, profile, hrSettings.monthStartDay, exceptions, setTab],
   );
 
   const handleOvertimeSubmit = useCallback(async (requestedMins: number, reasonText: string) => {
@@ -1413,14 +1462,24 @@ export default function DashboardApp() {
    */
   const lateCheckedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!uid || !profile || !session || !ledgerLoaded || !policyActive || policyOffDay) return;
+    if (!uid || !profile || !session || !ledgerLoaded || exceptionsLoading || !policyActive || policyOffDay) return;
     const date = localYmd(session.startTime);
     if (date !== localYmd() || lateCheckedRef.current === date) return;
-    if (ledger.some((e) => e.date === date && e.kind === "late" && e.status === "applied")) {
+    const storageKey = `mft_late_choice_${uid}_${date}`;
+    if (
+      sessionStorage.getItem(storageKey) ||
+      effectiveLedger.some((e) => e.date === date && e.kind === "late" && e.status === "applied") ||
+      exceptions.some(
+        (x) =>
+          (x.type === "advance_late" || x.type === "late") &&
+          String(x.exceptionDate || "") === date &&
+          x.status !== "rejected",
+      )
+    ) {
       lateCheckedRef.current = date;
       return;
     }
-    const ev = evaluateClockIn(session.startTime, usageFromLedger(ledger), policyCfg);
+    const ev = evaluateClockIn(session.startTime, policyUsage, policyCfg);
     if (ev.status === "on-time") {
       lateCheckedRef.current = date;
       return;
@@ -1428,7 +1487,7 @@ export default function DashboardApp() {
     lateCheckedRef.current = date;
     playTerminalBeep();
     setSmartLateIn({ clockIn: session.startTime, overwrite: false });
-  }, [uid, profile, session, ledgerLoaded, ledger, policyActive, policyOffDay, policyCfg]);
+  }, [uid, profile, session, ledgerLoaded, exceptionsLoading, effectiveLedger, exceptions, policyUsage, policyActive, policyOffDay, policyCfg]);
 
   /** Real-time Tasks Listener for Notifications (matches both single-string and array assignedTo) */
   useEffect(() => {
@@ -4252,12 +4311,27 @@ export default function DashboardApp() {
         <SmartLateClockInModal
           clockIn={smartLateIn.clockIn}
           usage={usageBeforeTodayLate}
+          dailyUsedMinutes={
+            effectiveLedger
+              .filter(
+                (e) =>
+                  e.date === localYmd(smartLateIn.clockIn) &&
+                  e.kind !== "late" &&
+                  e.status === "applied" &&
+                  e.covered &&
+                  (e.chargedMinutes || 0) > 0,
+              )
+              .reduce((sum, e) => sum + (e.chargedMinutes || 0), 0)
+          }
           cfg={policyCfg}
           hourlyRate={hrSettings.defaultHourlyRate || 31.25}
           busy={smartBusy}
           currentCoveredChoice={todayLateEntry ? todayLateEntry.covered : null}
           onChoose={(c, ev, penaltyDays) => void onSmartLateChoice(c, ev, penaltyDays)}
-          onClose={smartLateIn.overwrite ? () => setSmartLateIn(null) : undefined}
+          onClose={() => {
+            sessionStorage.setItem(`mft_late_choice_${uid}_${localYmd(smartLateIn.clockIn)}`, "dismissed");
+            setSmartLateIn(null);
+          }}
         />
       )}
 
