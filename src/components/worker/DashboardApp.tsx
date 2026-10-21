@@ -2347,6 +2347,100 @@ export default function DashboardApp() {
       <main className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6">
         <PwaPushBanner db={firebaseClient.db} uid={uid} workerName={firstName} />
 
+        {/* ── Prominent HR Broadcast / Unread Alert Banner (Appears across all tabs until read) ── */}
+        {unreadAlerts > 0 && tab !== "alerts" && (
+          <div
+            dir="rtl"
+            className="rounded-2xl border-2 border-red-600 bg-gradient-to-br from-red-50 via-white to-amber-50/60 dark:from-red-950/60 dark:via-zinc-900 dark:to-zinc-900 p-4 sm:p-5 shadow-lg animate-fade-in space-y-3"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-red-200 dark:border-red-900/60 pb-2.5">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex h-8 w-8 items-center justify-center rounded-xl bg-red-600 text-white text-base shadow-sm">
+                  📢
+                </span>
+                <div>
+                  <h2 className="text-sm sm:text-base font-extrabold text-red-700 dark:text-red-300 flex items-center gap-2">
+                    <span>رسالة / تنبيه هام من إدارة الموارد البشرية (HR Alert)</span>
+                    <span className="inline-flex items-center rounded-full bg-red-600 px-2 py-0.5 text-[11px] font-bold text-white">
+                      {unreadAlerts} غير مقروء
+                    </span>
+                  </h2>
+                  <p className="text-[11px] text-zinc-600 dark:text-zinc-400">
+                    يرجى قراءة الرسالة والضغط على &quot;تم الاطلاع&quot; لإخفائها من الشاشة الرئيسية
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {unreadAlerts > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => void onMarkAllRead()}
+                    disabled={markingAll}
+                    className="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-bold text-red-700 hover:bg-red-50 dark:border-red-800 dark:bg-zinc-800 dark:text-red-300 cursor-pointer"
+                  >
+                    ✓ تأكيد قراءة الكل ({unreadAlerts})
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setTab("alerts")}
+                  className="rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-bold text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 cursor-pointer"
+                >
+                  فتح سجل التنبيهات
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-2.5">
+              {alerts
+                .filter((a) => !a.isRead)
+                .slice(0, 3)
+                .map((a) => {
+                  const date = a.sentAt?.toDate?.() ?? a.createdAt?.toDate?.() ?? null;
+                  const isBroadcast = a.recipient === "all" || !a.workerId;
+                  return (
+                    <div
+                      key={a.id}
+                      className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-red-200/80 dark:border-red-900/50 bg-white/90 dark:bg-zinc-900/90 p-3.5 shadow-xs"
+                    >
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="inline-flex items-center rounded-md bg-red-100 dark:bg-red-950/70 px-2 py-0.5 text-[10px] font-bold text-red-700 dark:text-red-300">
+                            {isBroadcast ? "🌐 تعميم للجميع" : "👤 تنبيه خاص"}
+                          </span>
+                          {(a.priority === "high" || a.type === "urgent_directive") && (
+                            <span className="inline-flex items-center rounded-md bg-amber-100 dark:bg-amber-950/70 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:text-amber-300">
+                              ⚡ عاجل وهام
+                            </span>
+                          )}
+                          <h3 className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
+                            {a.title || "رسالة من الإدارة"}
+                          </h3>
+                        </div>
+                        <p className="text-xs sm:text-sm leading-relaxed text-zinc-700 dark:text-zinc-200 whitespace-pre-line">
+                          {a.message}
+                        </p>
+                        <p className="text-[11px] text-zinc-400">
+                          {date ? date.toLocaleString() : "الآن"}
+                          {a.sentBy ? ` · بواسطة ${a.sentBy}` : ""}
+                        </p>
+                      </div>
+                      <div className="shrink-0 flex items-center gap-2 self-end sm:self-center">
+                        <button
+                          type="button"
+                          onClick={() => void onMarkRead(a.id)}
+                          className="inline-flex items-center gap-1.5 rounded-xl bg-red-600 hover:bg-red-500 px-3.5 py-2 text-xs font-bold text-white shadow-xs transition cursor-pointer"
+                        >
+                          <span>✓ تم الاطلاع</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        )}
+
         {/* TAB: TASKS (home) */}
         {tab === "tasks" && (
           <section aria-labelledby="tasks-heading" className="space-y-6">
