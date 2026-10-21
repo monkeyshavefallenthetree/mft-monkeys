@@ -23,6 +23,8 @@ import type { ReimbursementStage, ReimbursementType } from "./hrPolicy2026";
 
 export type AttachmentKind = "ride_screenshot" | "quote" | "proforma" | "invoice";
 
+export type ReimbursementPayoutMethod = "payroll" | "instant_transfer";
+
 export type WorkerReimbursement = {
   id: string;
   workerId: string;
@@ -37,6 +39,7 @@ export type WorkerReimbursement = {
   approvedAmount?: number | null;
   invoiceAmount?: number | null;
   paidAmount?: number | null;
+  payoutMethod?: ReimbursementPayoutMethod;
   attachmentIds?: string[];
   attachmentKinds?: string[];
   imageHashes?: string[];

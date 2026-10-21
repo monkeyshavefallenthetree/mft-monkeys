@@ -1403,7 +1403,7 @@ export default function DashboardApp() {
             if (!first) {
               const before = prevStages.get(d.id);
               if (before && before !== stg) {
-                const titleText = String(data.title || "Expense claim");
+                const titleText = String(data.purpose || data.title || "مأمورية / مصروفات");
                 if (stg === "pending_invoice") {
                   playTerminalBeep();
                   toast.success("Purchase Pre-Approved ✓", {
@@ -1417,24 +1417,31 @@ export default function DashboardApp() {
                   });
                 } else if (stg === "approved") {
                   playTerminalBeep();
-                  toast.success("Reimbursement Approved 🎉", {
-                    description: `"${titleText}" has been approved by HR.`,
-                    action: { label: "Open", onClick: () => setTab("expenses") },
+                  const isInstant = data.payoutMethod === "instant_transfer";
+                  const msgTitle = isInstant
+                    ? "تم اعتماد المأمورية وتحويلها فوراً ⚡"
+                    : "تم اعتماد المأمورية (تنزل مع المرتب) 📅";
+                  const msgBody = isInstant
+                    ? `تم اعتماد "${titleText}" كتحويل فوري الآن (لن يُضاف على مرتب أول الشهر).`
+                    : `تم اعتماد "${titleText}" وسينزل أول الشهر مع المرتب.`;
+                  toast.success(msgTitle, {
+                    description: msgBody,
+                    action: { label: "عرض", onClick: () => setTab("expenses") },
                   });
                   void showBackgroundNotification({
-                    title: "Reimbursement Approved 🎉",
-                    body: `"${titleText}" has been approved by HR.`,
+                    title: msgTitle,
+                    body: msgBody,
                     tab: "expenses",
                   });
                 } else if (stg === "rejected") {
                   playTerminalBeep({ urgent: true });
                   toast.error("Reimbursement Rejected", {
-                    description: `"${titleText}": ${String(data.rejectionReason || "See details in Expenses tab.")}`,
+                    description: `"${titleText}": ${String(data.adminNote || data.rejectionReason || "See details in Expenses tab.")}`,
                     action: { label: "Open", onClick: () => setTab("expenses") },
                   });
                   void showBackgroundNotification({
                     title: "Reimbursement Rejected",
-                    body: `"${titleText}": ${String(data.rejectionReason || "See details in Expenses tab.")}`,
+                    body: `"${titleText}": ${String(data.adminNote || data.rejectionReason || "See details in Expenses tab.")}`,
                     tab: "expenses",
                     urgent: true,
                   });

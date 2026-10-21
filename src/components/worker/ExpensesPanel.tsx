@@ -228,6 +228,17 @@ export default function ExpensesPanel({ db, worker }: { db: Firestore; worker: {
                     <span>المطلوب: <b>{egp(r.invoiceAmount ?? r.amount)}</b></span>
                     {r.approvedAmount != null && <span>المعتمد: <b className="text-emerald-700 dark:text-emerald-400">{egp(r.approvedAmount)}</b></span>}
                     {r.stage === "approved" && r.paidAmount != null && <span>المصروف: <b>{egp(r.paidAmount)}</b></span>}
+                    {r.stage === "approved" && (
+                      r.payoutMethod === "instant_transfer" ? (
+                        <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-bold text-violet-800 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-300">
+                          ⚡ تم التحويل فورياً (خارج المرتب)
+                        </span>
+                      ) : (
+                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
+                          📅 ينزل أول الشهر مع المرتب
+                        </span>
+                      )
+                    )}
                   </div>
                   {r.adminNote && <p className="mt-2 rounded-lg bg-zinc-50 px-2.5 py-1.5 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">💬 {r.adminNote}</p>}
                   {r.stage === "pending_invoice" && (
