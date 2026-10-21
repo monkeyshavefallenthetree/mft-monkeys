@@ -69,6 +69,13 @@ export async function submitException(
     requestedAmount?: number | null;
     /** HR-POL-2026 annual leave length in days (0.5 steps). */
     leaveDays?: number | null;
+    /** External mission duration in hours & screenshot proof when outside allowed geofence. */
+    missionHours?: number | null;
+    screenshotUrl?: string | null;
+    workerLat?: number | null;
+    workerLng?: number | null;
+    nearestLocationName?: string | null;
+    distanceMeters?: number | null;
   },
 ): Promise<string> {
   const ref = await addDoc(collection(db, "exceptionRequests"), {
@@ -78,7 +85,9 @@ export async function submitException(
   });
 
   const labelMap: Record<string, string> = {
+    external_mission: "🚗 External Mission (مأمورية خارجية)",
     advance_late: "Advance Late Permission (إذن تأخير مسبق)",
+    early_permission: "Early Leave Permission (إذن انصراف مبكر)",
     unpaid_leave: "Unpaid Leave (إجازة بدون مرتب)",
     annual_leave: "Annual Leave (إجازة سنوية)",
     late: "Late Arrival Excuse (استثناء تأخير)",

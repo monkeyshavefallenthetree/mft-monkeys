@@ -31,6 +31,7 @@ import {
 } from "@/lib/worker/format";
 import {
   DEFAULT_HR_SETTINGS,
+  evaluateWorkerGeofence,
   evaluateWorkerLateness,
   formatTimeAmPm,
   getPayrollCycleRange,
@@ -38,6 +39,7 @@ import {
   subscribeHolidays,
   subscribeHrSettings,
   subscribeWorkerPayrollAdjustments,
+  type GeofenceCheckResult,
   type HolidayItem,
   type HrSettings,
   type PayrollAdjustment,
@@ -94,6 +96,7 @@ import {
 } from "@/lib/worker/permissions";
 import SmartClockOutModal, { type SmartClockOutChoice } from "./SmartClockOutModal";
 import SmartLateClockInModal, { type SmartLateClockInChoice } from "./SmartLateClockInModal";
+import OutsideLocationMissionModal from "./OutsideLocationMissionModal";
 import PermissionLeaveCard from "./PermissionLeaveCard";
 import ExpensesPanel from "./ExpensesPanel";
 import PwaPushBanner from "./PwaPushBanner";
@@ -200,6 +203,8 @@ function exceptionLabel(ex: ExceptionRow, weekendDays: number[] = [5, 6], holida
     holidays,
   );
   switch (ex.type) {
+    case "external_mission":
+      return `🚗 مأمورية خارجية (External Mission · ${ex.missionHours ?? Math.round((mins || 60) / 60)}h)`;
     case "late":
       return `Late Excuse (استثناء تأخير) · ${mins}m`;
     case "advance_late":
@@ -329,6 +334,10 @@ export default function DashboardApp() {
   const [smartOut, setSmartOut] = useState<{ mode: "clockout" | "logout"; requiredEnd: Date } | null>(null);
   const [smartLateIn, setSmartLateIn] = useState<{ clockIn: Date; overwrite?: boolean } | null>(null);
   const [smartBusy, setSmartBusy] = useState(false);
+  const [outsideLocationModalOpen, setOutsideLocationModalOpen] = useState(false);
+  const [lastGeofenceResult, setLastGeofenceResult] = useState<GeofenceCheckResult | null>(null);
+  const [lastGpsError, setLastGpsError] = useState<string | null>(null);
+  const [lastWorkerCoords, setLastWorkerCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [leaveDays, setLeaveDays] = useState(1);
   const [leaveStartDate, setLeaveStartDate] = useState(() => localYmd());
   const [leaveEndDate, setLeaveEndDate] = useState(() => localYmd());
@@ -585,6 +594,75 @@ export default function DashboardApp() {
 
     setShiftBusy(true);
     try {
+      // Check Geofence (Work Locations) if Admin has configured active locations
+      const activeWorkLocs = (hrSettings.workLocations ?? []).filter(
+        (l) => l.active !== false && Number.isFinite(Number(l.lat)) && Number.isFinite(Number(l.lng)),
+      );
+      const geofenceEnforced = hrSettings.enforceGeofence !== false && activeWorkLocs.length > 0;
+      const todayStr = localYmd();
+      const hasApprovedTodayMission = exceptions.some(
+        (x) =>
+          x.type === "external_mission" &&
+          String(x.exceptionDate || "") === todayStr &&
+          x.status === "approved",
+      );
+
+      if (geofenceEnforced && !hasApprovedTodayMission) {
+        if (typeof navigator === "undefined" || !navigator.geolocation) {
+          setLastGpsError(
+            "المتصفح لا يدعم تحديد الموقع الجغرافي (GPS) — لا يمكن بدء الشيفت العادي، يرجى إرسال طلب مأمورية خارجية.",
+          );
+          setLastGeofenceResult(null);
+          setShowShiftChoiceModal(false);
+          setOutsideLocationModalOpen(true);
+          setShiftBusy(false);
+          return;
+        }
+
+        const gpsPos = await new Promise<GeolocationPosition | null>((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => resolve(pos),
+            (err) => {
+              setLastGpsError(
+                err.code === 1
+                  ? "يرجى السماح بصلاحية الموقع الجغرافي (Location Permission) للتحقق من تواجدك داخل موقع العمل، أو أرسل طلب مأمورية خارجية بالأسفل."
+                  : "تعذر تحديد موقعك الحالي عبر الـ GPS — تأكد من تفعيل الموقع أو أرسل طلب مأمورية خارجية.",
+              );
+              resolve(null);
+            },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 10000 },
+          );
+        });
+
+        if (!gpsPos) {
+          setLastGeofenceResult(null);
+          setShowShiftChoiceModal(false);
+          setOutsideLocationModalOpen(true);
+          setShiftBusy(false);
+          toast.warning("📍 لا يمكن بدء الشيفت العادي بدون التحقق من اللوكيشن أو اعتماد مأمورية خارجية");
+          return;
+        }
+
+        const coords = { lat: gpsPos.coords.latitude, lng: gpsPos.coords.longitude };
+        setLastWorkerCoords(coords);
+        setLastGpsError(null);
+        const geoCheck = evaluateWorkerGeofence(coords.lat, coords.lng, hrSettings);
+        setLastGeofenceResult(geoCheck);
+
+        if (!geoCheck.inside) {
+          setShowShiftChoiceModal(false);
+          setOutsideLocationModalOpen(true);
+          setShiftBusy(false);
+          toast.warning("📍 أنت خارج موقع العمل المعتمد — أرسل طلب مأمورية لبدء العمل", {
+            description: geoCheck.nearestLocation
+              ? `أقرب موقع عمل (${geoCheck.nearestLocation.name}) يبعد عنك ${geoCheck.distanceMeters} متر.`
+              : undefined,
+          });
+          return;
+        }
+      }
+
+      setOutsideLocationModalOpen(false);
       const ws = await initWorkSession(
         fb.db,
         {
@@ -645,7 +723,7 @@ export default function DashboardApp() {
     } finally {
       setShiftBusy(false);
     }
-  }, [uid, profile, shiftBusy, myActiveTasks, selectedShiftTaskIds, shiftTaskNote]);
+  }, [uid, profile, shiftBusy, myActiveTasks, selectedShiftTaskIds, shiftTaskNote, hrSettings, exceptions]);
 
   const handleConfirmCheckIn = useCallback(
     async (data: { taskId?: string; taskTitle?: string; note?: string }) => {
@@ -2436,6 +2514,13 @@ export default function DashboardApp() {
                 </button>
                 <button
                   type="button"
+                  onClick={() => setOutsideLocationModalOpen(true)}
+                  className="rounded-xl border border-purple-300 bg-purple-50 px-3 py-1.5 text-xs font-bold text-purple-800 hover:bg-purple-100 dark:border-purple-800 dark:bg-purple-950/50 dark:text-purple-300 cursor-pointer"
+                >
+                  🚗 مأمورية خارجية (بساعات وسكرين شوت)
+                </button>
+                <button
+                  type="button"
                   onClick={() => setTab("expenses")}
                   className="rounded-xl border border-sky-300 bg-sky-50 px-3 py-1.5 text-xs font-bold text-sky-800 hover:bg-sky-100 dark:border-sky-800 dark:bg-sky-950/50 dark:text-sky-300 cursor-pointer"
                 >
@@ -4139,6 +4224,22 @@ export default function DashboardApp() {
                 </span>
               </button>
             </div>
+
+            {(hrSettings.workLocations ?? []).some((l) => l.active !== false) && (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-purple-200 bg-purple-50/70 px-3.5 py-2.5 text-xs text-purple-900 dark:border-purple-900/60 dark:bg-purple-950/30 dark:text-purple-200">
+                <span>📍 هل أنت خارج موقع العمل في مأمورية خارجية؟</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowShiftChoiceModal(false);
+                    setOutsideLocationModalOpen(true);
+                  }}
+                  className="rounded-lg bg-purple-600 px-3 py-1 text-[11px] font-bold text-white hover:bg-purple-700 cursor-pointer"
+                >
+                  🚗 إرسال طلب مأمورية (بساعات وسكرين شوت)
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -4453,6 +4554,24 @@ export default function DashboardApp() {
         secondsRemaining={checkInSecondsRemaining}
         isIdle={isWorkerIdle}
         onConfirm={handleConfirmCheckIn}
+      />
+
+      {/* ── Outside Work Location / External Mission Request Modal ── */}
+      <OutsideLocationMissionModal
+        open={outsideLocationModalOpen}
+        db={firebaseClient.db}
+        uid={uid}
+        workerName={`${profile.firstName ?? ""} ${profile.lastName ?? ""}`.trim() || (profile.email ?? "Worker")}
+        workerEmail={profile.email ?? ""}
+        geofenceResult={lastGeofenceResult}
+        gpsError={lastGpsError}
+        workerCoords={lastWorkerCoords}
+        todayMissionRequests={exceptions.filter(
+          (x) => x.type === "external_mission" && String(x.exceptionDate || "") === todayYmd,
+        )}
+        busy={shiftBusy}
+        onRetryGpsAndStartShift={() => void startActiveShift()}
+        onClose={() => setOutsideLocationModalOpen(false)}
       />
 
       {/* ── Mobile Bottom Navigation Bar ── */}

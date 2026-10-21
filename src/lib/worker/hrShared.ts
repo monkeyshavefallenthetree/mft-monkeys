@@ -8,6 +8,15 @@ import {
 } from "firebase/firestore";
 import { POLICY_2026_SETTINGS_DEFAULTS, type Policy2026SettingsFields } from "./hrPolicy2026";
 
+export interface WorkLocationItem {
+  id: string;
+  name: string;
+  lat: number;
+  lng: number;
+  radiusMeters: number; // e.g. 200
+  active?: boolean;
+}
+
 export interface HrSettings extends Policy2026SettingsFields {
   monthStartDay: number; // 1 - 28 (e.g. 21 for 21st to 20th cycle)
   weekendDays: number[]; // e.g. [5, 6] for Friday & Saturday
@@ -18,6 +27,8 @@ export interface HrSettings extends Policy2026SettingsFields {
   defaultHourlyRate: number; // 100
   overtimeMultiplier: number; // 1.5
   absencePenaltyMultiplier: number; // 2.0
+  workLocations?: WorkLocationItem[];
+  enforceGeofence?: boolean;
 }
 
 // Kept in sync with mft-admin DEFAULT_HR_SETTINGS (used only until `settings/hr` loads).
@@ -31,9 +42,80 @@ export const DEFAULT_HR_SETTINGS: HrSettings = {
   defaultHourlyRate: 31.25,
   overtimeMultiplier: 1.5,
   absencePenaltyMultiplier: 2.0,
+  workLocations: [],
+  enforceGeofence: true,
   // HR-POL-2026 (off until enabled by an admin)
   ...POLICY_2026_SETTINGS_DEFAULTS,
 };
+
+export interface GeofenceCheckResult {
+  enforced: boolean;
+  inside: boolean;
+  matchedLocation: WorkLocationItem | null;
+  nearestLocation: WorkLocationItem | null;
+  distanceMeters: number;
+}
+
+/**
+ * Computes distance in meters between two GPS coordinates using Haversine formula.
+ */
+export function haversineDistanceMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000; // Earth radius in meters
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
+}
+
+/**
+ * Checks if a worker's GPS position is within at least one active configured work location.
+ */
+export function evaluateWorkerGeofence(
+  workerLat: number,
+  workerLng: number,
+  settings: HrSettings = DEFAULT_HR_SETTINGS,
+): GeofenceCheckResult {
+  const activeLocs = (settings.workLocations ?? []).filter(
+    (l) => l.active !== false && Number.isFinite(Number(l.lat)) && Number.isFinite(Number(l.lng)),
+  );
+  if (settings.enforceGeofence === false || activeLocs.length === 0) {
+    return {
+      enforced: false,
+      inside: true,
+      matchedLocation: null,
+      nearestLocation: null,
+      distanceMeters: 0,
+    };
+  }
+
+  let nearest: WorkLocationItem | null = null;
+  let minDistance = Infinity;
+  let matched: WorkLocationItem | null = null;
+
+  for (const loc of activeLocs) {
+    const dist = haversineDistanceMeters(workerLat, workerLng, Number(loc.lat), Number(loc.lng));
+    const radius = Math.max(30, Number(loc.radiusMeters) || 200);
+    if (dist < minDistance) {
+      minDistance = dist;
+      nearest = loc;
+    }
+    if (dist <= radius && !matched) {
+      matched = loc;
+    }
+  }
+
+  return {
+    enforced: true,
+    inside: Boolean(matched),
+    matchedLocation: matched,
+    nearestLocation: nearest,
+    distanceMeters: Number.isFinite(minDistance) ? minDistance : 0,
+  };
+}
 
 export interface HolidayItem {
   id: string;
