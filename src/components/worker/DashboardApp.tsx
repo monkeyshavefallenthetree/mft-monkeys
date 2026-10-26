@@ -34,6 +34,7 @@ import {
   consumeOfficePinVerification,
   detectConnectionInfo,
   evaluateWorkerLateness,
+  fetchAllClientPublicIps,
   fetchClientPublicIp,
   formatTimeAmPm,
   getPayrollCycleRange,
@@ -590,7 +591,7 @@ export default function DashboardApp() {
   }, []);
 
   const startActiveShift = useCallback(
-    async (opts?: { pinJustVerified?: boolean; pcJustAuthorized?: boolean }) => {
+    async (opts?: { pinJustVerified?: boolean; pcJustAuthorized?: boolean; wifiJustVerified?: boolean }) => {
       const fb = getFirebase();
       if (!fb || !uid || !profile || shiftBusy) return;
 
@@ -631,22 +632,20 @@ export default function DashboardApp() {
 
       setShiftBusy(true);
       try {
-        // Ensure HR settings are loaded from Firestore so we never evaluate against uninitialized defaults
+        // Always fetch the latest HR settings from Firestore so newly registered Wi-Fi IPs work immediately
         let effectiveHrSettings = hrSettings;
-        if (!hrSettingsLoadedRef.current) {
-          try {
-            const hrSnap = await Promise.race([
-              getDoc(doc(fb.db, "settings", "hr")),
-              new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
-            ]);
-            if (hrSnap && hrSnap.exists()) {
-              effectiveHrSettings = { ...DEFAULT_HR_SETTINGS, ...(hrSnap.data() as Partial<HrSettings>) };
-              hrSettingsLoadedRef.current = true;
-              setHrSettings(effectiveHrSettings);
-            }
-          } catch {
-            /* fallback to current hrSettings */
+        try {
+          const hrSnap = await Promise.race([
+            getDoc(doc(fb.db, "settings", "hr")),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+          ]);
+          if (hrSnap && hrSnap.exists()) {
+            effectiveHrSettings = { ...DEFAULT_HR_SETTINGS, ...(hrSnap.data() as Partial<HrSettings>) };
+            hrSettingsLoadedRef.current = true;
+            setHrSettings(effectiveHrSettings);
           }
+        } catch {
+          /* fallback to current hrSettings */
         }
 
         // Non-GPS Office & Mission Gate (always enforced unless Admin explicitly turns off enforceGeofence)
@@ -676,17 +675,18 @@ export default function DashboardApp() {
           (Boolean(opts?.pcJustAuthorized) || isTrustedOfficePc(effectiveHrSettings).trusted);
 
         // 3) Device is connected to an approved Company Wi-Fi / Public IP (and is not on cellular data)
-        let verifiedByOfficeIp = false;
+        let verifiedByOfficeIp = Boolean(opts?.wifiJustVerified && !connInfo.isCellular);
         if (
           officeGateEnforced &&
           !connInfo.isCellular &&
           !hasApprovedTodayMission &&
           !verifiedByOfficePin &&
           !trustedPc &&
+          !verifiedByOfficeIp &&
           (effectiveHrSettings.officeNetworks ?? []).some((n) => n.active !== false && Boolean(n.ip?.trim()))
         ) {
-          const clientIp = await fetchClientPublicIp();
-          const matchedNet = matchOfficeNetworkIp(clientIp, effectiveHrSettings);
+          const clientIps = await fetchAllClientPublicIps();
+          const matchedNet = matchOfficeNetworkIp(clientIps, effectiveHrSettings);
           if (matchedNet) {
             verifiedByOfficeIp = true;
           }
@@ -1496,13 +1496,16 @@ export default function DashboardApp() {
     return () => unsub();
   }, [uid, registerUnsub, setTab]);
 
-  /** Real-time HR Settings & Company Holidays */
+  /** Real-time HR Settings & Company Holidays (waits for auth uid so Firestore rules allow reading settings/hr) */
   useEffect(() => {
+    if (!uid) return;
     const fb = getFirebase();
     if (!fb) return;
     const unsubSettings = registerUnsub(
-      subscribeHrSettings(fb.db, (s) => {
-        hrSettingsLoadedRef.current = true;
+      subscribeHrSettings(fb.db, (s, fromServer) => {
+        if (fromServer) {
+          hrSettingsLoadedRef.current = true;
+        }
         setHrSettings(s);
       }),
     );
@@ -1511,7 +1514,7 @@ export default function DashboardApp() {
       unsubSettings();
       unsubHolidays();
     };
-  }, [registerUnsub]);
+  }, [uid, registerUnsub]);
 
   /** Real-time Worker Payroll Adjustments (advances, allowances) */
   useEffect(() => {

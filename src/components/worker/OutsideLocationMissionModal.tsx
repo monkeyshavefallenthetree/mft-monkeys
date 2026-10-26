@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Firestore } from "firebase/firestore";
+import { doc, getDoc, type Firestore } from "firebase/firestore";
 import { compressImage, type CompressedImage } from "@/lib/worker/imageCompress";
 import { submitException, type ExceptionRow } from "@/lib/worker/exceptions";
 import {
+  DEFAULT_HR_SETTINGS,
   authorizeTrustedOfficePc,
   detectConnectionInfo,
-  fetchClientPublicIp,
+  fetchAllClientPublicIps,
   isTrustedOfficePc,
   markOfficePinVerifiedForToday,
   matchOfficeNetworkIp,
@@ -30,7 +31,11 @@ interface Props {
   workerCoords: { lat: number; lng: number } | null;
   todayMissionRequests: ExceptionRow[];
   busy?: boolean;
-  onRetryGpsAndStartShift: (opts?: { pinJustVerified?: boolean; pcJustAuthorized?: boolean }) => void;
+  onRetryGpsAndStartShift: (opts?: {
+    pinJustVerified?: boolean;
+    pcJustAuthorized?: boolean;
+    wifiJustVerified?: boolean;
+  }) => void;
   onClose: () => void;
 }
 
@@ -62,7 +67,8 @@ export default function OutsideLocationMissionModal({
   const [showPcSetup, setShowPcSetup] = useState(false);
   const [pcSetupCode, setPcSetupCode] = useState("");
   const [pcLabel, setPcLabel] = useState("");
-  const [detectedIp, setDetectedIp] = useState<string | null>(null);
+  const [detectedIps, setDetectedIps] = useState<string[]>([]);
+  const [liveSettings, setLiveSettings] = useState<HrSettings | null>(null);
   const [checkingIp, setCheckingIp] = useState(false);
   const [connInfo, setConnInfo] = useState(() => detectConnectionInfo());
 
@@ -73,15 +79,43 @@ export default function OutsideLocationMissionModal({
   const [compressing, setCompressing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
+  const effectiveSettings: HrSettings = liveSettings
+    ? {
+        ...hrSettings,
+        ...liveSettings,
+        officeNetworks:
+          (liveSettings.officeNetworks?.length ?? 0) > 0
+            ? liveSettings.officeNetworks
+            : hrSettings.officeNetworks,
+      }
+    : hrSettings;
+
   useEffect(() => {
     if (!open) return;
     let mounted = true;
     const info = detectConnectionInfo();
     setConnInfo(info);
     setCheckingIp(true);
-    fetchClientPublicIp()
-      .then((ip) => {
-        if (mounted && ip) setDetectedIp(ip);
+
+    Promise.all([
+      fetchAllClientPublicIps(),
+      getDoc(doc(db, "settings", "hr")).catch(() => null),
+    ])
+      .then(([ips, snap]) => {
+        if (!mounted) return;
+        if (ips.length > 0) setDetectedIps(ips);
+        let fresh = effectiveSettings;
+        if (snap && snap.exists()) {
+          fresh = { ...DEFAULT_HR_SETTINGS, ...(snap.data() as Partial<HrSettings>) };
+          setLiveSettings(fresh);
+        }
+        if (!info.isCellular) {
+          const matched = matchOfficeNetworkIp(ips, fresh);
+          if (matched) {
+            toast.success(`🌐 تم التأكد من اتصالك بشبكة الشركة (${matched.name}) ✓`);
+            onRetryGpsAndStartShift({ wifiJustVerified: true });
+          }
+        }
       })
       .finally(() => {
         if (mounted) setCheckingIp(false);
@@ -89,15 +123,21 @@ export default function OutsideLocationMissionModal({
     return () => {
       mounted = false;
     };
-  }, [open]);
+  }, [open, db]);
 
   if (!open) return null;
 
+  const detectedIp = detectedIps[0] || null;
   const pendingMission = todayMissionRequests.find((r) => !r.status || r.status === "pending");
   const approvedMission = todayMissionRequests.find((r) => r.status === "approved");
   const rejectedMission = todayMissionRequests.find((r) => r.status === "rejected");
-  const trustedPcStatus = isTrustedOfficePc(hrSettings);
-  const matchedOfficeNet = !connInfo.isCellular ? matchOfficeNetworkIp(detectedIp, hrSettings) : null;
+  const trustedPcStatus = isTrustedOfficePc(effectiveSettings);
+  const matchedOfficeNet = !connInfo.isCellular
+    ? matchOfficeNetworkIp(detectedIps, effectiveSettings)
+    : null;
+  const activeOfficeNets = (effectiveSettings.officeNetworks ?? []).filter(
+    (n) => n.active !== false && Boolean(n.ip?.trim()),
+  );
 
   const handleRecheckNetwork = async () => {
     const freshConn = detectConnectionInfo();
@@ -109,10 +149,25 @@ export default function OutsideLocationMissionModal({
       return;
     }
     setCheckingIp(true);
-    const ip = await fetchClientPublicIp();
-    setDetectedIp(ip);
+    const [ips, snap] = await Promise.all([
+      fetchAllClientPublicIps(),
+      getDoc(doc(db, "settings", "hr")).catch(() => null),
+    ]);
+    if (ips.length > 0) setDetectedIps(ips);
+    let freshSettings = effectiveSettings;
+    if (snap && snap.exists()) {
+      freshSettings = { ...DEFAULT_HR_SETTINGS, ...(snap.data() as Partial<HrSettings>) };
+      setLiveSettings(freshSettings);
+    }
     setCheckingIp(false);
-    onRetryGpsAndStartShift();
+
+    const matched = matchOfficeNetworkIp(ips, freshSettings);
+    if (matched) {
+      toast.success(`🌐 تم التأكد من اتصالك بشبكة الشركة (${matched.name}) ✓ — جاري بدء الشيفت...`);
+      onRetryGpsAndStartShift({ wifiJustVerified: true });
+    } else {
+      onRetryGpsAndStartShift();
+    }
   };
 
   const handleVerifyOfficePin = (e: React.FormEvent) => {
@@ -130,7 +185,7 @@ export default function OutsideLocationMissionModal({
       toast.warning("يرجى إدخال كود حضور المكتب اليومي (اطلبه من الأدمن أو الـ HR).");
       return;
     }
-    if (!verifyOfficePinInput(officePin, hrSettings, today)) {
+    if (!verifyOfficePinInput(officePin, effectiveSettings, today)) {
       toast.error("كود حضور المكتب غير صحيح — تأكد من الكود المكون من 4 أرقام الظاهر في لوحة الـ HR لليوم.");
       return;
     }
@@ -152,7 +207,7 @@ export default function OutsideLocationMissionModal({
       toast.warning("يرجى إدخال كود اعتماد أجهزة الشركة الخاص بالأدمن.");
       return;
     }
-    const ok = authorizeTrustedOfficePc(pcSetupCode, pcLabel || "كمبيوتر مكتبي بالشركة", hrSettings);
+    const ok = authorizeTrustedOfficePc(pcSetupCode, pcLabel || "كمبيوتر مكتبي بالشركة", effectiveSettings);
     if (!ok) {
       toast.error("كود اعتماد الجهاز غير صحيح — يرجى مراجعة الأدمن.");
       return;
@@ -317,25 +372,43 @@ export default function OutsideLocationMissionModal({
           <div className="mt-4 space-y-4">
             {/* Option 1: Office Wi-Fi / IP Auto-Check */}
             <div className="rounded-xl border-2 border-sky-500 bg-sky-50/60 p-3.5 dark:border-sky-800 dark:bg-sky-950/30 flex flex-wrap items-center justify-between gap-2 text-xs">
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <div className="font-extrabold text-zinc-900 dark:text-white flex items-center gap-1.5">
                   <span>🌐</span>
                   <span>١. التحقق عبر شبكة Wi-Fi الشركة</span>
                 </div>
                 {detectedIp ? (
-                  <div className="text-[11px] text-zinc-600 dark:text-zinc-300 flex flex-wrap items-center gap-1.5">
-                    <span>عنوان شبكتك الحالي (IP):</span>
-                    <code className="rounded bg-white px-1.5 py-0.5 font-mono font-bold text-zinc-900 border border-zinc-300 dark:bg-zinc-800 dark:text-zinc-200 dark:border-zinc-700" dir="ltr">
-                      {detectedIp}
-                    </code>
-                    {matchedOfficeNet ? (
-                      <span className="rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                        ✓ مطابق لشبكة الشركة ({matchedOfficeNet.name})
-                      </span>
-                    ) : (
-                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
-                        غير مسجل كـ Wi-Fi شركة
-                      </span>
+                  <div className="space-y-1">
+                    <div className="text-[11px] text-zinc-600 dark:text-zinc-300 flex flex-wrap items-center gap-1.5">
+                      <span>عنوان شبكتك الحالي (IP):</span>
+                      <code className="rounded bg-white px-1.5 py-0.5 font-mono font-bold text-zinc-900 border border-zinc-300 dark:bg-zinc-800 dark:text-zinc-200 dark:border-zinc-700" dir="ltr">
+                        {detectedIp}
+                      </code>
+                      {matchedOfficeNet ? (
+                        <span className="rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                          ✓ مطابق لشبكة الشركة ({matchedOfficeNet.name})
+                        </span>
+                      ) : (
+                        <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
+                          غير مطابق للشبكات المسجلة
+                        </span>
+                      )}
+                    </div>
+                    {!matchedOfficeNet && (
+                      <div className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                        {activeOfficeNets.length === 0 ? (
+                          <span className="text-red-600 dark:text-red-400 font-bold">
+                            ⚠️ لم يتم حفظ أي IP لشبكة الشركة في إعدادات الـ HR بعد (يجب على الأدمن الضغط على «سجل شبكة الشركة الحالية» في لوحة الـ HR).
+                          </span>
+                        ) : (
+                          <span>
+                            الشبكات المسجلة في النظام:{" "}
+                            <code className="font-mono font-bold text-zinc-700 dark:text-zinc-300" dir="ltr">
+                              {activeOfficeNets.map((n) => n.ip).join(" , ")}
+                            </code>
+                          </span>
+                        )}
+                      </div>
                     )}
                   </div>
                 ) : (
@@ -348,14 +421,20 @@ export default function OutsideLocationMissionModal({
                 type="button"
                 onClick={() => void handleRecheckNetwork()}
                 disabled={busy || checkingIp}
-                className="rounded-xl bg-sky-600 px-4 py-2.5 text-xs font-extrabold text-white shadow-md hover:bg-sky-500 disabled:opacity-50 cursor-pointer shrink-0"
+                className={`rounded-xl px-4 py-2.5 text-xs font-extrabold text-white shadow-md disabled:opacity-50 cursor-pointer shrink-0 ${
+                  matchedOfficeNet ? "bg-emerald-600 hover:bg-emerald-500" : "bg-sky-600 hover:bg-sky-500"
+                }`}
               >
-                {busy || checkingIp ? "⏳ جاري الفحص..." : "🔄 فحص اتصال Wi-Fi الشركة الآن"}
+                {busy || checkingIp
+                  ? "⏳ جاري الفحص..."
+                  : matchedOfficeNet
+                    ? "✓ بدء الشيفت عبر Wi-Fi الشركة"
+                    : "🔄 فحص اتصال Wi-Fi الشركة الآن"}
               </button>
             </div>
 
             {/* Option 2: Daily Office PIN */}
-            {hrSettings.officePinEnabled !== false && (
+            {effectiveSettings.officePinEnabled !== false && (
               <form
                 onSubmit={handleVerifyOfficePin}
                 className="rounded-xl border-2 border-emerald-500 bg-emerald-50/60 p-4 dark:border-emerald-700 dark:bg-emerald-950/30 space-y-3"

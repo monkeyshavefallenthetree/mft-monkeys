@@ -281,9 +281,25 @@ export function authorizeTrustedOfficePc(
 }
 
 /**
- * Fetches the client's current Public IP address.
+ * Normalizes an IP string or pattern by converting Arabic/Persian digits,
+ * stripping invisible directional characters, whitespace, protocol prefixes, and ::ffff:.
  */
-export async function fetchClientPublicIp(): Promise<string | null> {
+export function normalizeIpString(raw: string | null | undefined): string {
+  if (!raw) return "";
+  return normalizeDigits(String(raw))
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
+    .replace(/^https?:\/\//i, "")
+    .replace(/\/.*$/, "")
+    .replace(/^::ffff:/i, "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+/**
+ * Fetches all candidate Public IP addresses for the current client (both IPv4 and header IP).
+ * Always prefers IPv4 first because all devices on the same office Wi-Fi NAT router share the same IPv4.
+ */
+export async function fetchAllClientPublicIps(): Promise<string[]> {
   const fetchWithTimeout = async (url: string, ms = 3000): Promise<Response> => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), ms);
@@ -294,45 +310,82 @@ export async function fetchClientPublicIp(): Promise<string | null> {
     }
   };
 
-  try {
-    const res = await fetchWithTimeout("/api/client-ip", 2500);
-    if (res.ok) {
-      const data = (await res.json()) as { ip?: string | null };
-      if (data?.ip) return data.ip.trim();
-    }
-  } catch {
-    /* fallback below */
-  }
-  try {
-    const res = await fetchWithTimeout("https://api.ipify.org?format=json", 2500);
-    if (res.ok) {
+  const results = await Promise.allSettled([
+    (async () => {
+      const res = await fetchWithTimeout("https://api.ipify.org?format=json", 2800);
+      if (!res.ok) return null;
       const data = (await res.json()) as { ip?: string };
-      if (data?.ip) return data.ip.trim();
+      return normalizeIpString(data?.ip);
+    })(),
+    (async () => {
+      const res = await fetchWithTimeout("/api/client-ip", 2500);
+      if (!res.ok) return null;
+      const data = (await res.json()) as { ip?: string | null };
+      return normalizeIpString(data?.ip);
+    })(),
+  ]);
+
+  const ips: string[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled" && r.value && !ips.includes(r.value)) {
+      ips.push(r.value);
     }
-  } catch {
-    /* ignore */
   }
-  return null;
+  return ips;
 }
 
 /**
- * Checks if a client IP matches any active configured Office Network IP / prefix.
+ * Fetches the client's primary Public IP address (preferring IPv4).
+ */
+export async function fetchClientPublicIp(): Promise<string | null> {
+  const ips = await fetchAllClientPublicIps();
+  return ips[0] || null;
+}
+
+function getIpv6NetworkPrefix64(ip: string): string | null {
+  if (!ip.includes(":")) return null;
+  const parts = ip.split(":").filter(Boolean);
+  if (parts.length < 4) return null;
+  return parts.slice(0, 4).join(":");
+}
+
+/**
+ * Checks if a client IP (or list of client IPs) matches any active configured Office Network IP / prefix.
  */
 export function matchOfficeNetworkIp(
-  clientIp: string | null | undefined,
+  clientIpOrList: string | string[] | null | undefined,
   settings?: Partial<HrSettings>,
 ): OfficeNetworkItem | null {
-  const ip = (clientIp || "").trim();
-  if (!ip) return null;
+  const candidateIps = (Array.isArray(clientIpOrList) ? clientIpOrList : [clientIpOrList])
+    .map((x) => normalizeIpString(x))
+    .filter(Boolean);
+  if (candidateIps.length === 0) return null;
+
   const activeNets = (settings?.officeNetworks ?? []).filter(
-    (n) => n.active !== false && Boolean(n.ip?.trim()),
+    (n) => n.active !== false && Boolean(normalizeIpString(n.ip)),
   );
+
   for (const net of activeNets) {
-    const pat = net.ip.trim();
-    if (pat === ip) return net;
-    if (pat.endsWith("*")) {
-      const prefix = pat.replace(/\*+$/, "");
-      if (prefix && ip.startsWith(prefix)) return net;
+    // Allow comma or space separated patterns inside net.ip
+    const rawPatterns = String(net.ip || "")
+      .split(/[,\s|]+/)
+      .map((p) => normalizeIpString(p))
+      .filter(Boolean);
+
+    for (const pat of rawPatterns) {
+      for (const ip of candidateIps) {
+        if (pat === ip) return net;
+        if (pat.endsWith("*")) {
+          const prefix = pat.replace(/\*+$/, "");
+          if (prefix && ip.startsWith(prefix)) return net;
+        }
+        // If both are IPv6 addresses on the same router (/64 prefix), match the router prefix
+        if (pat.includes(":") && ip.includes(":")) {
+          const patPfx = getIpv6NetworkPrefix64(pat);
+          const ipPfx = getIpv6NetworkPrefix64(ip);
+          if (patPfx && ipPfx && patPfx === ipPfx) return net;
+        }
+      }
     }
   }
   return null;
@@ -568,24 +621,27 @@ function formatYmd(d: Date): string {
  */
 export function subscribeHrSettings(
   db: Firestore,
-  callback: (settings: HrSettings) => void,
+  callback: (settings: HrSettings, fromServer?: boolean) => void,
 ): () => void {
   const ref = doc(db, "settings", "hr");
   return onSnapshot(
     ref,
     (snap) => {
       if (snap.exists()) {
-        callback({
-          ...DEFAULT_HR_SETTINGS,
-          ...snap.data(),
-        });
+        callback(
+          {
+            ...DEFAULT_HR_SETTINGS,
+            ...snap.data(),
+          },
+          true,
+        );
       } else {
-        callback(DEFAULT_HR_SETTINGS);
+        callback(DEFAULT_HR_SETTINGS, true);
       }
     },
     (err) => {
       console.warn("[hrShared] Error subscribing to hr settings:", err);
-      callback(DEFAULT_HR_SETTINGS);
+      callback(DEFAULT_HR_SETTINGS, false);
     },
   );
 }
