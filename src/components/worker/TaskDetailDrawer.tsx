@@ -776,13 +776,13 @@ export default function TaskDetailDrawer({
                                 {st.title}
                               </span>
                               {st.description && (
-                                <p
+                                <div
                                   className={`text-[11px] mt-0.5 whitespace-pre-wrap break-words ${
                                     st.completed ? "text-zinc-400 dark:text-zinc-500 line-through" : "text-zinc-500 dark:text-zinc-400"
                                   }`}
                                 >
                                   <LinkifiedText text={st.description} />
-                                </p>
+                                </div>
                               )}
                               {st.link && (
                                 <div className="mt-1.5">

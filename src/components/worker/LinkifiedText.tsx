@@ -75,23 +75,79 @@ export function parseTextWithLinks(text: string): Array<{
   return result;
 }
 
-const RICH_HTML_RE = /<(h[1-6]|p|div|span|strong|b|em|i|u|s|strike|ul|ol|li|blockquote|br|font|mark|a)\b/i;
+const RICH_HTML_TAG_RE = /<\/?[a-z][a-z0-9:_-]*\b[^>]*>/i;
+
+export function decodeHtmlEntities(input?: string | null): string {
+  if (!input) return "";
+  let s = String(input);
+  for (let i = 0; i < 2; i++) {
+    s = s
+      .replace(/&nbsp;|&#160;|&#xa0;/gi, " ")
+      .replace(/&quot;|&#34;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&lt;|&#60;/gi, "<")
+      .replace(/&gt;|&#62;/gi, ">")
+      .replace(/&#(\d+);/g, (_, dec) => {
+        const code = Number(dec);
+        return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : _;
+      })
+      .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+        const code = parseInt(hex, 16);
+        return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : _;
+      })
+      .replace(/&amp;|&#38;/gi, "&");
+  }
+  return s.replace(/\u00a0/g, " ");
+}
+
+export function normalizeRichHtml(raw?: string | null): string {
+  if (!raw) return "";
+  let s = String(raw);
+
+  // 1. Unescape double-escaped HTML entities (e.g. &amp;nbsp; -> &nbsp;, &amp;lt; -> &lt;)
+  for (let i = 0; i < 2; i++) {
+    if (/&amp;(?:nbsp|lt|gt|quot|apos|amp|#\d+|#x[0-9a-f]+);/i.test(s)) {
+      s = s.replace(/&amp;((?:nbsp|lt|gt|quot|apos|amp|#\d+|#x[0-9a-f]+);)/gi, "&$1");
+    }
+  }
+
+  // 2. If the string contains escaped HTML tags (e.g. &lt;p&gt;, &lt;div, &lt;span, &lt;br), unescape them so they parse as rich HTML instead of showing raw code
+  if (
+    /&lt;\s*\/?\s*(?:h[1-6]|p|div|span|strong|b|em|i|u|s|strike|ul|ol|li|blockquote|br|font|mark|a|style|script|meta|link|xml|o:p|table|tr|td|th|pre|code|hr|article|section|header|footer)\b[\s\S]*?&gt;/i.test(
+      s,
+    )
+  ) {
+    s = s
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'");
+  }
+
+  // 3. Remove HTML comments, Word conditional comments, and non-content blocks (<style>, <script>, <xml>, <meta>, <o:p>, etc.)
+  s = s
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<!\[[\s\S]*?\]>/g, "")
+    .replace(/<(style|script|xml|head|title|svg|noscript|iframe|object|embed)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<\/?(meta|link|base|o:p|w:[a-z0-9_-]+|m:[a-z0-9_-]+|v:[a-z0-9_-]+)\b[^>]*\/?>/gi, "");
+
+  return s;
+}
 
 export function isRichHtml(text?: string | null): boolean {
   if (!text) return false;
-  return RICH_HTML_RE.test(text);
+  const cleaned = normalizeRichHtml(text);
+  return RICH_HTML_TAG_RE.test(cleaned);
 }
 
 export function stripRichHtml(text?: string | null): string {
   if (!text) return "";
-  if (!isRichHtml(text)) return text;
-  return text
-    .replace(/<(br|\/p|\/div|\/h[1-6]|\/li|\/blockquote)\b[^>]*>/gi, " ")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
+  const cleaned = normalizeRichHtml(text);
+  return decodeHtmlEntities(
+    cleaned
+      .replace(/<(br|\/p|\/div|\/h[1-6]|\/li|\/blockquote|\/tr|hr)\b[^>]*\/?>/gi, " ")
+      .replace(/<[^>]+>/g, ""),
+  )
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -164,7 +220,7 @@ function renderDomNode(
   linkClassName?: string,
 ): React.ReactNode {
   if (node.nodeType === Node.TEXT_NODE) {
-    const content = node.textContent || "";
+    const content = (node.textContent || "").replace(/\u00a0/g, " ");
     if (!content) return null;
     return <React.Fragment key={key}>{renderLinkTokens(content, linkClassName, key)}</React.Fragment>;
   }
@@ -172,6 +228,24 @@ function renderDomNode(
   if (node.nodeType !== Node.ELEMENT_NODE) return null;
   const el = node as HTMLElement;
   const tag = el.tagName.toLowerCase();
+  if (
+    tag === "style" ||
+    tag === "script" ||
+    tag === "xml" ||
+    tag === "head" ||
+    tag === "title" ||
+    tag === "meta" ||
+    tag === "link" ||
+    tag === "base" ||
+    tag === "svg" ||
+    tag === "noscript" ||
+    tag === "iframe" ||
+    tag === "object" ||
+    tag === "embed" ||
+    tag === "o:p"
+  ) {
+    return null;
+  }
   const style = parseSafeInlineStyle(el.getAttribute("style"));
   const colorAttr = el.getAttribute("color");
   if (colorAttr && !style.color) {
@@ -326,7 +400,8 @@ export default function LinkifiedText({
   linkClassName,
   placeholder,
 }: LinkifiedTextProps) {
-  if (!text || (!isRichHtml(text) && !text.trim()) || (isRichHtml(text) && !stripRichHtml(text))) {
+  const plainStripped = stripRichHtml(text);
+  if (!text || !plainStripped) {
     if (placeholder !== undefined) {
       return typeof placeholder === "string" ? (
         <span className="italic text-zinc-400">{placeholder}</span>
@@ -337,9 +412,11 @@ export default function LinkifiedText({
     return null;
   }
 
-  if (isRichHtml(text) && typeof window !== "undefined" && typeof DOMParser !== "undefined") {
+  const normalized = normalizeRichHtml(text);
+
+  if (isRichHtml(normalized) && typeof window !== "undefined" && typeof DOMParser !== "undefined") {
     const parser = new DOMParser();
-    const doc = parser.parseFromString(text, "text/html");
+    const doc = parser.parseFromString(normalized, "text/html");
     const nodes = Array.from(doc.body.childNodes).map((node, idx) =>
       renderDomNode(node, `rich-${idx}`, linkClassName),
     );
@@ -350,9 +427,11 @@ export default function LinkifiedText({
     );
   }
 
+  const cleanText = isRichHtml(normalized) ? plainStripped : decodeHtmlEntities(normalized);
+
   return (
     <span dir="auto" className={className}>
-      {renderLinkTokens(text, linkClassName, "plain")}
+      {renderLinkTokens(cleanText, linkClassName, "plain")}
     </span>
   );
 }

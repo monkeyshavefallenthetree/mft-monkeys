@@ -22,7 +22,7 @@ import TasksCalendar from "./TasksCalendar";
 import TaskBoardView from "./TaskBoardView";
 import TaskDetailDrawer from "./TaskDetailDrawer";
 import ProjectGroupChatModal from "./ProjectGroupChatModal";
-import LinkifiedText from "./LinkifiedText";
+import LinkifiedText, { stripRichHtml } from "./LinkifiedText";
 import RichDescriptionEditor from "./RichDescriptionEditor";
 import { toast, confirmDialog } from "@/lib/worker/feedback";
 import { localYmd } from "@/lib/worker/format";
@@ -330,7 +330,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const matchTitle = (t.title || "").toLowerCase().includes(q);
-        const matchDesc = (t.description || "").toLowerCase().includes(q);
+        const matchDesc = stripRichHtml(t.description || "").toLowerCase().includes(q);
         const matchProj = (t.projectName || "").toLowerCase().includes(q);
         const matchAssignee = resolveAssigneeDisplay(t).toLowerCase().includes(q);
         if (!matchTitle && !matchDesc && !matchProj && !matchAssignee) return false;
@@ -1299,10 +1299,10 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
                             })()}
                           </div>
 
-                          {task.description && (
-                            <p className="mt-1 line-clamp-2 text-xs text-zinc-500 leading-normal">
+                          {task.description && stripRichHtml(task.description) && (
+                            <div className="mt-1 line-clamp-2 text-xs text-zinc-500 leading-normal">
                               <LinkifiedText text={task.description} />
-                            </p>
+                            </div>
                           )}
 
                           {/* Assignee & Submitter tag */}
@@ -1839,9 +1839,9 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
                         <div className="flex-1 min-w-0">
                           <span className="font-semibold block truncate text-zinc-800 dark:text-zinc-200">{st.title}</span>
                           {st.description && (
-                            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 whitespace-pre-wrap">
+                            <div className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 whitespace-pre-wrap">
                               <LinkifiedText text={st.description} />
-                            </p>
+                            </div>
                           )}
                           {st.link && (
                             <a

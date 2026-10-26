@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { isRichHtml, stripRichHtml } from "./LinkifiedText";
+import { decodeHtmlEntities, isRichHtml, normalizeRichHtml, stripRichHtml } from "./LinkifiedText";
 
 interface RichDescriptionEditorProps {
   value: string;
@@ -32,8 +32,9 @@ const HIGHLIGHT_COLORS = [
 
 function plainTextToHtml(raw: string): string {
   if (!raw) return "";
-  if (isRichHtml(raw)) return raw;
-  return raw
+  const cleaned = normalizeRichHtml(raw);
+  if (isRichHtml(cleaned)) return cleaned;
+  return decodeHtmlEntities(cleaned)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -70,11 +71,42 @@ export default function RichDescriptionEditor({
   const emitChange = () => {
     const el = editorRef.current;
     if (!el) return;
-    const html = el.innerHTML;
+    const html = normalizeRichHtml(el.innerHTML).replace(/&nbsp;/gi, " ");
     const stripped = stripRichHtml(html);
     const nextVal = stripped ? html : "";
     lastEmittedRef.current = nextVal;
     onChange(nextVal);
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const plain = e.clipboardData.getData("text/plain");
+    if (!plain) return;
+    try {
+      if (document.queryCommandSupported && document.queryCommandSupported("insertText")) {
+        document.execCommand("insertText", false, plain);
+        emitChange();
+        return;
+      }
+    } catch {
+      /* fallback below */
+    }
+    const selection = window.getSelection();
+    if (selection && selection.rangeCount > 0) {
+      selection.deleteFromDocument();
+      const range = selection.getRangeAt(0);
+      const frag = document.createDocumentFragment();
+      const lines = plain.split(/\r?\n/);
+      lines.forEach((line, idx) => {
+        if (idx > 0) frag.appendChild(document.createElement("br"));
+        frag.appendChild(document.createTextNode(line));
+      });
+      range.insertNode(frag);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    emitChange();
   };
 
   const exec = (command: string, arg?: string) => {
@@ -293,6 +325,7 @@ export default function RichDescriptionEditor({
             emitChange();
           }}
           onInput={emitChange}
+          onPaste={handlePaste}
           style={{ minHeight }}
           className="w-full px-3.5 py-2.5 text-xs sm:text-sm text-zinc-900 dark:text-zinc-100 leading-relaxed focus:outline-none overflow-y-auto max-h-64 [&_h1]:text-lg [&_h1]:font-bold [&_h1]:my-1 [&_h2]:text-base [&_h2]:font-bold [&_h2]:my-1 [&_h3]:text-sm [&_h3]:font-bold [&_h3]:my-0.5 [&_p]:my-1 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_blockquote]:border-l-3 [&_blockquote]:border-red-500 [&_blockquote]:pl-3 [&_blockquote]:italic"
         />
