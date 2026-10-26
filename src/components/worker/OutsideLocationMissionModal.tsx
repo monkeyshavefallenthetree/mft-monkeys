@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { doc, getDoc, type Firestore } from "firebase/firestore";
+import { useEffect, useRef, useState } from "react";
+import { type Firestore } from "firebase/firestore";
 import { compressImage, type CompressedImage } from "@/lib/worker/imageCompress";
 import { submitException, type ExceptionRow } from "@/lib/worker/exceptions";
 import {
-  DEFAULT_HR_SETTINGS,
   authorizeTrustedOfficePc,
   detectConnectionInfo,
   fetchAllClientPublicIps,
+  fetchLatestHrSettings,
   isTrustedOfficePc,
   markOfficePinVerifiedForToday,
   matchOfficeNetworkIp,
@@ -72,6 +72,10 @@ export default function OutsideLocationMissionModal({
   const [checkingIp, setCheckingIp] = useState(false);
   const [connInfo, setConnInfo] = useState(() => detectConnectionInfo());
 
+  const onRetryRef = useRef(onRetryGpsAndStartShift);
+  onRetryRef.current = onRetryGpsAndStartShift;
+  const autoTriggeredRef = useRef(false);
+
   // External mission state
   const [missionHours, setMissionHours] = useState<number>(4);
   const [reason, setReason] = useState("");
@@ -91,7 +95,10 @@ export default function OutsideLocationMissionModal({
     : hrSettings;
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      autoTriggeredRef.current = false;
+      return;
+    }
     let mounted = true;
     const info = detectConnectionInfo();
     setConnInfo(info);
@@ -99,22 +106,17 @@ export default function OutsideLocationMissionModal({
 
     Promise.all([
       fetchAllClientPublicIps(),
-      getDoc(doc(db, "settings", "hr")).catch(() => null),
+      fetchLatestHrSettings(db, hrSettings),
     ])
-      .then(([ips, snap]) => {
+      .then(([ips, fresh]) => {
         if (!mounted) return;
         if (ips.length > 0) setDetectedIps(ips);
-        let fresh = effectiveSettings;
-        if (snap && snap.exists()) {
-          fresh = { ...DEFAULT_HR_SETTINGS, ...(snap.data() as Partial<HrSettings>) };
-          setLiveSettings(fresh);
-        }
-        if (!info.isCellular) {
-          const matched = matchOfficeNetworkIp(ips, fresh);
-          if (matched) {
-            toast.success(`🌐 تم التأكد من اتصالك بشبكة الشركة (${matched.name}) ✓`);
-            onRetryGpsAndStartShift({ wifiJustVerified: true });
-          }
+        setLiveSettings(fresh);
+        const matched = matchOfficeNetworkIp(ips, fresh);
+        if (matched) {
+          autoTriggeredRef.current = true;
+          toast.success(`🌐 تم التأكد من اتصالك بشبكة الشركة (${matched.name}) ✓`);
+          onRetryRef.current({ wifiJustVerified: true });
         }
       })
       .finally(() => {
@@ -125,6 +127,15 @@ export default function OutsideLocationMissionModal({
     };
   }, [open, db]);
 
+  const matchedOfficeNet = matchOfficeNetworkIp(detectedIps, effectiveSettings);
+
+  useEffect(() => {
+    if (!open || !matchedOfficeNet || autoTriggeredRef.current) return;
+    autoTriggeredRef.current = true;
+    toast.success(`🌐 تم التأكد من اتصالك بشبكة الشركة (${matchedOfficeNet.name}) ✓`);
+    onRetryRef.current({ wifiJustVerified: true });
+  }, [open, matchedOfficeNet]);
+
   if (!open) return null;
 
   const detectedIp = detectedIps[0] || null;
@@ -132,9 +143,6 @@ export default function OutsideLocationMissionModal({
   const approvedMission = todayMissionRequests.find((r) => r.status === "approved");
   const rejectedMission = todayMissionRequests.find((r) => r.status === "rejected");
   const trustedPcStatus = isTrustedOfficePc(effectiveSettings);
-  const matchedOfficeNet = !connInfo.isCellular
-    ? matchOfficeNetworkIp(detectedIps, effectiveSettings)
-    : null;
   const activeOfficeNets = (effectiveSettings.officeNetworks ?? []).filter(
     (n) => n.active !== false && Boolean(n.ip?.trim()),
   );
@@ -142,38 +150,53 @@ export default function OutsideLocationMissionModal({
   const handleRecheckNetwork = async () => {
     const freshConn = detectConnectionInfo();
     setConnInfo(freshConn);
+    setCheckingIp(true);
+    const [ips, freshSettings] = await Promise.all([
+      fetchAllClientPublicIps(),
+      fetchLatestHrSettings(db, effectiveSettings),
+    ]);
+    if (ips.length > 0) setDetectedIps(ips);
+    setLiveSettings(freshSettings);
+    setCheckingIp(false);
+
+    const matched = matchOfficeNetworkIp(ips, freshSettings);
+    if (matched) {
+      toast.success(`🌐 تم التأكد من اتصالك بشبكة الشركة (${matched.name}) ✓ — جاري بدء الشيفت...`);
+      onRetryRef.current({ wifiJustVerified: true });
+      return;
+    }
+
     if (freshConn.isCellular) {
       toast.error("📵 أنت ما زلت متصلاً بباقة الموبايل (Mobile Data)!", {
         description: "أغلق بيانات الهاتف واتصل بـ Wi-Fi الشركة أولاً، أو أرسل طلب مأمورية خارجية.",
       });
       return;
     }
-    setCheckingIp(true);
-    const [ips, snap] = await Promise.all([
-      fetchAllClientPublicIps(),
-      getDoc(doc(db, "settings", "hr")).catch(() => null),
-    ]);
-    if (ips.length > 0) setDetectedIps(ips);
-    let freshSettings = effectiveSettings;
-    if (snap && snap.exists()) {
-      freshSettings = { ...DEFAULT_HR_SETTINGS, ...(snap.data() as Partial<HrSettings>) };
-      setLiveSettings(freshSettings);
-    }
-    setCheckingIp(false);
-
-    const matched = matchOfficeNetworkIp(ips, freshSettings);
-    if (matched) {
-      toast.success(`🌐 تم التأكد من اتصالك بشبكة الشركة (${matched.name}) ✓ — جاري بدء الشيفت...`);
-      onRetryGpsAndStartShift({ wifiJustVerified: true });
-    } else {
-      onRetryGpsAndStartShift();
-    }
+    onRetryRef.current();
   };
 
   const handleVerifyOfficePin = (e: React.FormEvent) => {
     e.preventDefault();
     const freshConn = detectConnectionInfo();
     setConnInfo(freshConn);
+    const trimmedInput = officePin.trim();
+    if (!trimmedInput) {
+      toast.warning("يرجى إدخال كود حضور المكتب اليومي (اطلبه من الأدمن أو الـ HR).");
+      return;
+    }
+
+    // Also allow if the worker typed a registered Office IP or if their live IP matches the office network
+    const matchedByTypedOrLiveIp = matchOfficeNetworkIp(
+      [trimmedInput, ...detectedIps],
+      effectiveSettings,
+    );
+    if (matchedByTypedOrLiveIp && !freshConn.isCellular) {
+      setOfficePin("");
+      toast.success(`🌐 تم التأكد من شبكة الشركة (${matchedByTypedOrLiveIp.name}) ✓ — جاري بدء الشيفت...`);
+      onRetryRef.current({ wifiJustVerified: true });
+      return;
+    }
+
     if (freshConn.isCellular) {
       toast.error("📵 لا يمكن استخدام كود حضور المكتب وأنت فاتح باقة الموبايل (Mobile Data)!", {
         description: "يرجى إغلاق الداتا والاتصال بـ Wi-Fi الشركة أولاً، أو إرسال طلب مأمورية خارجية.",
@@ -181,18 +204,14 @@ export default function OutsideLocationMissionModal({
       return;
     }
     const today = localYmd();
-    if (!officePin.trim()) {
-      toast.warning("يرجى إدخال كود حضور المكتب اليومي (اطلبه من الأدمن أو الـ HR).");
-      return;
-    }
-    if (!verifyOfficePinInput(officePin, effectiveSettings, today)) {
+    if (!verifyOfficePinInput(trimmedInput, effectiveSettings, today)) {
       toast.error("كود حضور المكتب غير صحيح — تأكد من الكود المكون من 4 أرقام الظاهر في لوحة الـ HR لليوم.");
       return;
     }
     markOfficePinVerifiedForToday(uid, today);
     setOfficePin("");
     toast.success("🏢 تم التحقق من تواجدك داخل الشركة بكود المكتب ✓ — جاري بدء الشيفت...");
-    onRetryGpsAndStartShift({ pinJustVerified: true });
+    onRetryRef.current({ pinJustVerified: true });
   };
 
   const handleAuthorizeOfficePc = (e: React.FormEvent) => {
@@ -215,7 +234,7 @@ export default function OutsideLocationMissionModal({
     setPcSetupCode("");
     setShowPcSetup(false);
     toast.success("💻 تم اعتماد هذا الكمبيوتر كجهاز مكتبي ثابت داخل الشركة ✓ — جاري بدء الشيفت...");
-    onRetryGpsAndStartShift({ pcJustAuthorized: true });
+    onRetryRef.current({ pcJustAuthorized: true });
   };
 
   const handlePickImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -318,7 +337,7 @@ export default function OutsideLocationMissionModal({
         </div>
 
         {/* Network / Cellular Status Diagnostic Box (No GPS) */}
-        {connInfo.isCellular ? (
+        {connInfo.isCellular && !matchedOfficeNet ? (
           <div className="mt-3.5 rounded-xl border-2 border-red-500 bg-red-50 p-3 text-xs text-red-900 dark:border-red-700 dark:bg-red-950/50 dark:text-red-200 space-y-1">
             <p className="font-extrabold flex items-center gap-1.5">
               <span>📵</span>

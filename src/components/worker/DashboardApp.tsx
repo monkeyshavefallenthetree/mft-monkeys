@@ -36,6 +36,7 @@ import {
   evaluateWorkerLateness,
   fetchAllClientPublicIps,
   fetchClientPublicIp,
+  fetchLatestHrSettings,
   formatTimeAmPm,
   getPayrollCycleRange,
   hasVerifiedOfficePinToday,
@@ -608,9 +609,15 @@ export default function DashboardApp() {
           return item;
         });
 
-      // If starting from inside OutsideLocationMissionModal and no task was checked, auto-select the first active task
+      // If starting from inside OutsideLocationMissionModal (or with verification flags) and no task was checked, auto-select the first active task
       if (myActiveTasks.length > 0 && chosenTasks.length === 0 && !shiftTaskNote.trim()) {
-        if (outsideLocationModalOpen && myActiveTasks[0]) {
+        if (
+          (outsideLocationModalOpen ||
+            opts?.wifiJustVerified ||
+            opts?.pinJustVerified ||
+            opts?.pcJustAuthorized) &&
+          myActiveTasks[0]
+        ) {
           const first = myActiveTasks[0];
           const fallbackItem: { id: string; title: string; projectName?: string } = {
             id: String(first.id || ""),
@@ -632,18 +639,12 @@ export default function DashboardApp() {
 
       setShiftBusy(true);
       try {
-        // Always fetch the latest HR settings from Firestore so newly registered Wi-Fi IPs work immediately
+        // Always fetch the latest HR settings (including universal mirror) so newly registered Wi-Fi IPs work immediately
         let effectiveHrSettings = hrSettings;
         try {
-          const hrSnap = await Promise.race([
-            getDoc(doc(fb.db, "settings", "hr")),
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
-          ]);
-          if (hrSnap && hrSnap.exists()) {
-            effectiveHrSettings = { ...DEFAULT_HR_SETTINGS, ...(hrSnap.data() as Partial<HrSettings>) };
-            hrSettingsLoadedRef.current = true;
-            setHrSettings(effectiveHrSettings);
-          }
+          effectiveHrSettings = await fetchLatestHrSettings(fb.db, hrSettings);
+          hrSettingsLoadedRef.current = true;
+          setHrSettings(effectiveHrSettings);
         } catch {
           /* fallback to current hrSettings */
         }
@@ -661,7 +662,6 @@ export default function DashboardApp() {
         );
 
         // Non-GPS Office Verification Channels (Zero GPS usage):
-        // Note: Cellular / Mobile Data (4G/5G) is NEVER allowed to pass as inside-office!
         // 1) Worker verified today's 4-digit Office PIN right now (and is not on cellular data)
         const verifiedByOfficePin =
           !connInfo.isCellular &&
@@ -674,11 +674,10 @@ export default function DashboardApp() {
           !connInfo.isMobileDevice &&
           (Boolean(opts?.pcJustAuthorized) || isTrustedOfficePc(effectiveHrSettings).trusted);
 
-        // 3) Device is connected to an approved Company Wi-Fi / Public IP (and is not on cellular data)
-        let verifiedByOfficeIp = Boolean(opts?.wifiJustVerified && !connInfo.isCellular);
+        // 3) Device is connected to an approved Company Wi-Fi / Public IP
+        let verifiedByOfficeIp = Boolean(opts?.wifiJustVerified);
         if (
           officeGateEnforced &&
-          !connInfo.isCellular &&
           !hasApprovedTodayMission &&
           !verifiedByOfficePin &&
           !trustedPc &&

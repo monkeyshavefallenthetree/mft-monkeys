@@ -1,6 +1,8 @@
 import {
   collection,
   doc,
+  getDoc,
+  getDocs,
   onSnapshot,
   query,
   where,
@@ -286,13 +288,41 @@ export function authorizeTrustedOfficePc(
  */
 export function normalizeIpString(raw: string | null | undefined): string {
   if (!raw) return "";
-  return normalizeDigits(String(raw))
+  const s = normalizeDigits(String(raw))
     .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
     .replace(/^https?:\/\//i, "")
-    .replace(/\/.*$/, "")
     .replace(/^::ffff:/i, "")
-    .replace(/\s+/g, "")
+    .trim()
     .toLowerCase();
+  const ipv4Match = s.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.(?:\d{1,3}|\*))(?:\s*\/\s*(\d{1,2}))?/);
+  if (ipv4Match && ipv4Match[1]) {
+    if (ipv4Match[2] === "24") {
+      const octets = ipv4Match[1].split(".");
+      return `${octets[0]}.${octets[1]}.${octets[2]}.*`;
+    }
+    return ipv4Match[1];
+  }
+  return s.replace(/\/.*$/, "").replace(/[^\da-f:.*]/g, "");
+}
+
+function extractIpTokens(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  const normalized = normalizeDigits(String(raw))
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
+    .toLowerCase();
+  const tokens = new Set<string>();
+  const parts = normalized.split(/[,،;|/\s]+/);
+  for (const part of parts) {
+    const clean = normalizeIpString(part);
+    if (clean && (clean.includes(".") || clean.includes(":"))) {
+      tokens.add(clean);
+    }
+  }
+  const single = normalizeIpString(raw);
+  if (single && (single.includes(".") || single.includes(":"))) {
+    tokens.add(single);
+  }
+  return Array.from(tokens);
 }
 
 /**
@@ -300,7 +330,7 @@ export function normalizeIpString(raw: string | null | undefined): string {
  * Always prefers IPv4 first because all devices on the same office Wi-Fi NAT router share the same IPv4.
  */
 export async function fetchAllClientPublicIps(): Promise<string[]> {
-  const fetchWithTimeout = async (url: string, ms = 3000): Promise<Response> => {
+  const fetchWithTimeout = async (url: string, ms = 4000): Promise<Response> => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), ms);
     try {
@@ -312,15 +342,27 @@ export async function fetchAllClientPublicIps(): Promise<string[]> {
 
   const results = await Promise.allSettled([
     (async () => {
-      const res = await fetchWithTimeout("https://api.ipify.org?format=json", 2800);
+      const res = await fetchWithTimeout("https://api.ipify.org?format=json", 3800);
       if (!res.ok) return null;
       const data = (await res.json()) as { ip?: string };
       return normalizeIpString(data?.ip);
     })(),
     (async () => {
-      const res = await fetchWithTimeout("/api/client-ip", 2500);
+      const res = await fetchWithTimeout("https://ipv4.icanhazip.com", 3800);
+      if (!res.ok) return null;
+      const txt = await res.text();
+      return normalizeIpString(txt);
+    })(),
+    (async () => {
+      const res = await fetchWithTimeout("/api/client-ip", 3000);
       if (!res.ok) return null;
       const data = (await res.json()) as { ip?: string | null };
+      return normalizeIpString(data?.ip);
+    })(),
+    (async () => {
+      const res = await fetchWithTimeout("https://api64.ipify.org?format=json", 3800);
+      if (!res.ok) return null;
+      const data = (await res.json()) as { ip?: string };
       return normalizeIpString(data?.ip);
     })(),
   ]);
@@ -349,6 +391,11 @@ function getIpv6NetworkPrefix64(ip: string): string | null {
   return parts.slice(0, 4).join(":");
 }
 
+function getIpv4Subnet24Prefix(ip: string): string | null {
+  const m = ip.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/);
+  return m && m[1] ? `${m[1]}.` : null;
+}
+
 /**
  * Checks if a client IP (or list of client IPs) matches any active configured Office Network IP / prefix.
  */
@@ -356,21 +403,18 @@ export function matchOfficeNetworkIp(
   clientIpOrList: string | string[] | null | undefined,
   settings?: Partial<HrSettings>,
 ): OfficeNetworkItem | null {
-  const candidateIps = (Array.isArray(clientIpOrList) ? clientIpOrList : [clientIpOrList])
-    .map((x) => normalizeIpString(x))
-    .filter(Boolean);
+  const rawList = Array.isArray(clientIpOrList) ? clientIpOrList : [clientIpOrList];
+  const candidateIps = Array.from(new Set(rawList.flatMap((x) => extractIpTokens(x))));
   if (candidateIps.length === 0) return null;
 
   const activeNets = (settings?.officeNetworks ?? []).filter(
-    (n) => n.active !== false && Boolean(normalizeIpString(n.ip)),
+    (n) => n.active !== false && extractIpTokens(n.ip).length > 0,
   );
 
+  const isCellular = detectConnectionInfo().isCellular;
+
   for (const net of activeNets) {
-    // Allow comma or space separated patterns inside net.ip
-    const rawPatterns = String(net.ip || "")
-      .split(/[,\s|]+/)
-      .map((p) => normalizeIpString(p))
-      .filter(Boolean);
+    const rawPatterns = extractIpTokens(net.ip);
 
     for (const pat of rawPatterns) {
       for (const ip of candidateIps) {
@@ -384,6 +428,12 @@ export function matchOfficeNetworkIp(
           const patPfx = getIpv6NetworkPrefix64(pat);
           const ipPfx = getIpv6NetworkPrefix64(ip);
           if (patPfx && ipPfx && patPfx === ipPfx) return net;
+        }
+        // If both are IPv4 on the same ISP /24 router pool and device is on Wi-Fi/Ethernet (not cellular)
+        if (!isCellular && pat.includes(".") && ip.includes(".")) {
+          const patSub = getIpv4Subnet24Prefix(pat);
+          const ipSub = getIpv4Subnet24Prefix(ip);
+          if (patSub && ipSub && patSub === ipSub) return net;
         }
       }
     }
@@ -616,34 +666,156 @@ function formatYmd(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+const HR_MIRROR_TASK_ID = "__hr_system_config__";
+const HR_WORKER_CACHE_KEY = "mft_worker_hr_settings_cache_v1";
+
+function readWorkerCachedHrSettings(): Partial<HrSettings> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(HR_WORKER_CACHE_KEY);
+    if (!raw) return {};
+    return JSON.parse(raw) as Partial<HrSettings>;
+  } catch {
+    return {};
+  }
+}
+
+function writeWorkerCachedHrSettings(s: HrSettings): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(HR_WORKER_CACHE_KEY, JSON.stringify(s));
+  } catch {
+    /* ignore */
+  }
+}
+
+function mergeHrSettingsSources(
+  primaryData: (Partial<HrSettings> & { _mirrorUpdatedAtMs?: number }) | null,
+  mirrorData: (Partial<HrSettings> & { _mirrorUpdatedAtMs?: number }) | null,
+  fallback?: Partial<HrSettings>,
+): HrSettings {
+  const cached = readWorkerCachedHrSettings();
+  const pTs = Number(primaryData?._mirrorUpdatedAtMs || 0);
+  const mTs = Number(mirrorData?._mirrorUpdatedAtMs || 0);
+  const ordered =
+    mTs >= pTs
+      ? [DEFAULT_HR_SETTINGS, cached, fallback || {}, primaryData || {}, mirrorData || {}]
+      : [DEFAULT_HR_SETTINGS, cached, fallback || {}, mirrorData || {}, primaryData || {}];
+
+  const merged = Object.assign({}, ...ordered) as HrSettings;
+  const netCandidates = [
+    mTs >= pTs ? mirrorData?.officeNetworks : primaryData?.officeNetworks,
+    mTs >= pTs ? primaryData?.officeNetworks : mirrorData?.officeNetworks,
+    fallback?.officeNetworks,
+    cached.officeNetworks,
+  ];
+  for (const nets of netCandidates) {
+    if (Array.isArray(nets) && nets.length > 0) {
+      merged.officeNetworks = nets;
+      break;
+    }
+  }
+  writeWorkerCachedHrSettings(merged);
+  return merged;
+}
+
 /**
- * Real-time subscription to HR settings from Firestore (`settings/hr`).
+ * Fetches the latest HR settings from both `settings/hr` and the universal mirror `tasks/__hr_system_config__/messages`.
+ */
+export async function fetchLatestHrSettings(
+  db: Firestore,
+  fallback?: Partial<HrSettings>,
+): Promise<HrSettings> {
+  const withTimeout = <T>(p: Promise<T>, ms = 3500): Promise<T | null> =>
+    Promise.race([p, new Promise<null>((resolve) => setTimeout(() => resolve(null), ms))]).catch(() => null);
+
+  const [primarySnap, mirrorSnap] = await Promise.all([
+    withTimeout(getDoc(doc(db, "settings", "hr")), 3500),
+    withTimeout(getDocs(collection(db, "tasks", HR_MIRROR_TASK_ID, "messages")), 3500),
+  ]);
+
+  let primaryData: (Partial<HrSettings> & { _mirrorUpdatedAtMs?: number }) | null = null;
+  if (primarySnap && primarySnap.exists()) {
+    primaryData = primarySnap.data() as Partial<HrSettings> & { _mirrorUpdatedAtMs?: number };
+  }
+
+  let mirrorData: (Partial<HrSettings> & { _mirrorUpdatedAtMs?: number }) | null = null;
+  if (mirrorSnap && !mirrorSnap.empty) {
+    let maxTs = -1;
+    mirrorSnap.forEach((d) => {
+      const data = d.data() as Partial<HrSettings> & { _mirrorUpdatedAtMs?: number };
+      const ts = Number(data._mirrorUpdatedAtMs || 0);
+      if (ts >= maxTs) {
+        maxTs = ts;
+        mirrorData = data;
+      }
+    });
+  }
+
+  return mergeHrSettingsSources(primaryData, mirrorData, fallback);
+}
+
+/**
+ * Real-time subscription to HR settings from Firestore (`settings/hr` + universal mirror).
  */
 export function subscribeHrSettings(
   db: Firestore,
   callback: (settings: HrSettings, fromServer?: boolean) => void,
 ): () => void {
+  let primaryData: (Partial<HrSettings> & { _mirrorUpdatedAtMs?: number }) | null = null;
+  let mirrorData: (Partial<HrSettings> & { _mirrorUpdatedAtMs?: number }) | null = null;
+  let hasServerResponse = false;
+
+  const emit = () => {
+    const merged = mergeHrSettingsSources(primaryData, mirrorData);
+    callback(merged, hasServerResponse);
+  };
+
   const ref = doc(db, "settings", "hr");
-  return onSnapshot(
+  const unsubPrimary = onSnapshot(
     ref,
     (snap) => {
+      hasServerResponse = true;
       if (snap.exists()) {
-        callback(
-          {
-            ...DEFAULT_HR_SETTINGS,
-            ...snap.data(),
-          },
-          true,
-        );
-      } else {
-        callback(DEFAULT_HR_SETTINGS, true);
+        primaryData = snap.data() as Partial<HrSettings> & { _mirrorUpdatedAtMs?: number };
       }
+      emit();
     },
     (err) => {
       console.warn("[hrShared] Error subscribing to hr settings:", err);
-      callback(DEFAULT_HR_SETTINGS, false);
+      emit();
     },
   );
+
+  const mirrorCol = collection(db, "tasks", HR_MIRROR_TASK_ID, "messages");
+  const unsubMirror = onSnapshot(
+    mirrorCol,
+    (snap) => {
+      hasServerResponse = true;
+      let newest: (Partial<HrSettings> & { _mirrorUpdatedAtMs?: number }) | null = null;
+      let maxTs = -1;
+      snap.forEach((d) => {
+        const data = d.data() as Partial<HrSettings> & { _mirrorUpdatedAtMs?: number };
+        const ts = Number(data._mirrorUpdatedAtMs || 0);
+        if (ts >= maxTs) {
+          maxTs = ts;
+          newest = data;
+        }
+      });
+      if (newest) {
+        mirrorData = newest;
+      }
+      emit();
+    },
+    () => {
+      emit();
+    },
+  );
+
+  return () => {
+    unsubPrimary();
+    unsubMirror();
+  };
 }
 
 /**
