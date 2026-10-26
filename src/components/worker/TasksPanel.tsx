@@ -11,6 +11,9 @@ import {
   updateTask,
   deleteTask,
   assignedWorkerIds,
+  getTaskAssigneeIds,
+  canUserManageTask,
+  isWorkerAdminOrAccountManager,
   sanitizeSubtask,
   sanitizeSubtasks,
   type ProjectRow,
@@ -33,6 +36,8 @@ type Props = {
   db: Firestore;
   uid: string;
   workerName: string;
+  workerEmail?: string;
+  workerRole?: string;
   onToast?: (msg: string, kind?: "ok" | "err") => void;
   onNewAdminMessage?: () => void;
 };
@@ -93,12 +98,30 @@ export function isTaskUrgent(task: TaskRow): boolean {
   return p === "urgent" || p === "high";
 }
 
-export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: Props) {
+export default function TasksPanel({
+  db,
+  uid,
+  workerName,
+  workerEmail,
+  workerRole,
+  onNewAdminMessage,
+}: Props) {
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [workers, setWorkers] = useState<WorkerRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+
+  const canManageTask = useCallback(
+    (task: TaskRow | null | undefined) =>
+      canUserManageTask(task, uid, { email: workerEmail, role: workerRole }),
+    [uid, workerEmail, workerRole],
+  );
+
+  const isPrivilegedManager = useMemo(
+    () => isWorkerAdminOrAccountManager({ email: workerEmail, role: workerRole }),
+    [workerEmail, workerRole],
+  );
 
   // View & Filter States
   const [viewMode, setViewMode] = useState<"list" | "board" | "calendar">("list");
@@ -210,18 +233,10 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
     return `${w.firstName ?? ""} ${w.lastName ?? ""}`.trim() || id;
   };
 
-  /** Resolves assignee names dynamically using assignedTo, assignedWorkerIds, workerId, or workers collection lookup */
+  /** Resolves assignee names dynamically using getTaskAssigneeIds or workers collection lookup */
   const resolveAssigneeDisplay = useCallback(
     (task: TaskRow): string => {
-      const ids = Array.from(
-        new Set(
-          [
-            ...assignedWorkerIds(task.assignedTo),
-            ...(Array.isArray(task.assignedWorkerIds) ? task.assignedWorkerIds : []),
-            ...(task.workerId ? [String(task.workerId)] : []),
-          ].filter(Boolean),
-        ),
-      );
+      const ids = getTaskAssigneeIds(task);
 
       if (ids.length > 0) {
         const names = ids.map((id) => {
@@ -254,11 +269,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
     let assignedMe = 0;
     let createdMe = 0;
     for (const t of tasks) {
-      const ids = [
-        ...assignedWorkerIds(t.assignedTo),
-        ...(Array.isArray(t.assignedWorkerIds) ? t.assignedWorkerIds : []),
-        ...(t.workerId ? [String(t.workerId)] : []),
-      ];
+      const ids = getTaskAssigneeIds(t);
       if (ids.includes(uid)) assignedMe++;
       if (t.createdBy === uid) createdMe++;
     }
@@ -294,11 +305,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
     const filtered = tasks.filter((t) => {
       // Scope filter
       if (scopeFilter === "assigned-me") {
-        const ids = [
-          ...assignedWorkerIds(t.assignedTo),
-          ...(Array.isArray(t.assignedWorkerIds) ? t.assignedWorkerIds : []),
-          ...(t.workerId ? [String(t.workerId)] : []),
-        ];
+        const ids = getTaskAssigneeIds(t);
         if (!ids.includes(uid)) return false;
       } else if (scopeFilter === "created-me") {
         if (t.createdBy !== uid) return false;
@@ -432,6 +439,11 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
   };
 
   const openEditModal = (task: TaskRow) => {
+    if (!canManageTask(task)) {
+      toast.warning("🔒 للعرض فقط — التعديل وتغيير صلاحيات الوصول متاح فقط للمعينين على التاسك أو الأدمن أو الأكونت مانجر");
+      return;
+    }
+
     let startDateStr = "";
     if (task.startDate) {
       const val = task.startDate as any;
@@ -457,15 +469,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
     setFormProjectId(task.projectId || "");
     setFormStartDate(startDateStr);
     setFormDueDate(dateStr);
-    const initialWorkerIds = Array.from(
-      new Set(
-        [
-          ...assignedWorkerIds(task.assignedTo),
-          ...(Array.isArray(task.assignedWorkerIds) ? task.assignedWorkerIds : []),
-          ...(task.workerId ? [String(task.workerId)] : []),
-        ].filter(Boolean),
-      ),
-    );
+    const initialWorkerIds = getTaskAssigneeIds(task);
     setFormAssignedWorkerIds(initialWorkerIds.length > 0 ? initialWorkerIds : [uid]);
     setFormSubtasks(task.subtasks || []);
     setNewSubtaskInput("");
@@ -495,6 +499,10 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
   async function startTask(id: string) {
     try {
       const targetTask = tasks.find((t) => t.id === id) || activeTask;
+      if (!canManageTask(targetTask)) {
+        toast.warning("🔒 للعرض فقط — التعديل متاح فقط للمعينين على التاسك أو الأدمن أو الأكونت مانجر");
+        return;
+      }
       await updateTask(db, id, {
         status: "in-progress",
         startedAt: serverTimestamp(),
@@ -512,13 +520,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
         projectId: targetTask?.projectId,
       });
       if (targetTask) {
-        const coWorkers = Array.from(
-          new Set([
-            ...assignedWorkerIds(targetTask.assignedTo),
-            ...(Array.isArray(targetTask.assignedWorkerIds) ? targetTask.assignedWorkerIds : []),
-            ...(targetTask.workerId ? [String(targetTask.workerId)] : []),
-          ]),
-        ).filter((wId) => wId && wId !== uid);
+        const coWorkers = getTaskAssigneeIds(targetTask).filter((wId) => wId && wId !== uid);
         if (coWorkers.length > 0) {
           void sendWebPushToWorkers(db, {
             recipientUids: coWorkers,
@@ -539,6 +541,10 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
   async function submitApproval(id: string) {
     try {
       const targetTask = tasks.find((t) => t.id === id) || activeTask;
+      if (!canManageTask(targetTask)) {
+        toast.warning("🔒 للعرض فقط — التعديل متاح فقط للمعينين على التاسك أو الأدمن أو الأكونت مانجر");
+        return;
+      }
       await updateTask(db, id, {
         status: "pending-approval",
         submittedForApprovalAt: serverTimestamp(),
@@ -559,13 +565,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
         projectId: targetTask?.projectId,
       });
       if (targetTask) {
-        const coWorkers = Array.from(
-          new Set([
-            ...assignedWorkerIds(targetTask.assignedTo),
-            ...(Array.isArray(targetTask.assignedWorkerIds) ? targetTask.assignedWorkerIds : []),
-            ...(targetTask.workerId ? [String(targetTask.workerId)] : []),
-          ]),
-        ).filter((wId) => wId && wId !== uid);
+        const coWorkers = getTaskAssigneeIds(targetTask).filter((wId) => wId && wId !== uid);
         if (coWorkers.length > 0) {
           void sendWebPushToWorkers(db, {
             recipientUids: coWorkers,
@@ -592,6 +592,10 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
   async function undoSubmission(id: string) {
     try {
       const targetTask = tasks.find((t) => t.id === id) || activeTask;
+      if (!canManageTask(targetTask)) {
+        toast.warning("🔒 للعرض فقط — التعديل متاح فقط للمعينين على التاسك أو الأدمن أو الأكونت مانجر");
+        return;
+      }
       await updateTask(db, id, {
         status: "in-progress",
         submittedForApprovalAt: null,
@@ -623,6 +627,10 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
   async function claimTask(id: string) {
     try {
       const targetTask = tasks.find((t) => t.id === id) || activeTask;
+      if (!canManageTask(targetTask)) {
+        toast.warning("🔒 للعرض فقط — يجب أن يتم تعيينك من قِبل أحد المعينين أو الأدمن أو الأكونت مانجر");
+        return;
+      }
       await updateTask(db, id, {
         assignedTo: uid,
         assignedWorkerName: workerName || "Team Member",
@@ -650,6 +658,11 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
   }
 
   async function handleDeleteTask(taskId: string) {
+    const targetTask = tasks.find((t) => t.id === taskId) || activeTask;
+    if (!canManageTask(targetTask)) {
+      toast.warning("🔒 للعرض فقط — الحذف متاح فقط للمعينين على التاسك أو الأدمن أو الأكونت مانجر");
+      return;
+    }
     const ok = await confirmDialog({
       title: "Delete Task Directive",
       message: "Are you sure you want to delete this task? This action cannot be undone.",
@@ -722,6 +735,12 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
         });
         toast.success("Task created & assigned", { description: `Assigned to ${assignedNames}` });
       } else if (modalMode === "edit" && editId) {
+        const targetTask = tasks.find((t) => t.id === editId);
+        if (!canManageTask(targetTask)) {
+          toast.warning("🔒 للعرض فقط — التعديل متاح فقط للمعينين على التاسك أو الأدمن أو الأكونت مانجر");
+          setFormSaving(false);
+          return;
+        }
         const updateData: Record<string, unknown> = {
           title: formTitle.trim(),
           description: formDesc.trim(),
@@ -729,6 +748,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
           priority: formPriority,
           status: formStatus,
           assignedTo: assignedToVal,
+          assignedWorkerIds: formAssignedWorkerIds,
           assignedWorkerName: assignedNames || "Unassigned",
           startDate: formStartDate ? new Date(formStartDate) : null,
           dueDate: formDueDate ? new Date(formDueDate) : null,
@@ -1110,6 +1130,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
       {viewMode === "board" ? (
         <TaskBoardView
           tasks={filteredTasks}
+          canManageTask={canManageTask}
           onSelectTask={(t) => setActiveTask(t)}
           onStartTask={startTask}
           onSubmitApproval={submitApproval}
@@ -1337,102 +1358,88 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
 
                         {/* Right side actions */}
                         <div className="flex items-center gap-2 self-end sm:self-center" onClick={(e) => e.stopPropagation()}>
-                          {/* Claim Action for Unassigned Directives */}
-                          {resolveAssigneeDisplay(task) === "Unassigned" && (
-                            <button
-                              type="button"
-                              disabled={inlineActionTaskId === task.id}
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                setInlineActionTaskId(task.id);
-                                try {
-                                  await claimTask(task.id);
-                                } finally {
-                                  setInlineActionTaskId(null);
-                                }
-                              }}
-                              className="inline-flex items-center gap-1 rounded-lg bg-red-600 px-2.5 py-1 text-xs font-semibold text-white shadow-xs hover:bg-red-700 active:scale-[0.98] transition-all cursor-pointer disabled:opacity-60"
-                              title="Claim and assign this directive to yourself"
-                            >
-                              {inlineActionTaskId === task.id ? (
-                                <span className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                              ) : (
-                                <span>✋ Claim</span>
+                          {canManageTask(task) ? (
+                            <>
+                              {/* Fast Inline Progression Action */}
+                              {task.status === "assigned" && resolveAssigneeDisplay(task) !== "Unassigned" && (
+                                <button
+                                  type="button"
+                                  disabled={inlineActionTaskId === task.id}
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    setInlineActionTaskId(task.id);
+                                    try {
+                                      await startTask(task.id);
+                                    } finally {
+                                      setInlineActionTaskId(null);
+                                    }
+                                  }}
+                                  className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white shadow-xs hover:bg-emerald-700 active:scale-[0.98] transition-all cursor-pointer disabled:opacity-60"
+                                  title="Start this task now"
+                                >
+                                  {inlineActionTaskId === task.id ? (
+                                    <span className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                                  ) : (
+                                    <span>▶ Start</span>
+                                  )}
+                                </button>
                               )}
-                            </button>
-                          )}
 
-                          {/* Fast Inline Progression Action */}
-                          {task.status === "assigned" && resolveAssigneeDisplay(task) !== "Unassigned" && (
-                            <button
-                              type="button"
-                              disabled={inlineActionTaskId === task.id}
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                setInlineActionTaskId(task.id);
-                                try {
-                                  await startTask(task.id);
-                                } finally {
-                                  setInlineActionTaskId(null);
-                                }
-                              }}
-                              className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white shadow-xs hover:bg-emerald-700 active:scale-[0.98] transition-all cursor-pointer disabled:opacity-60"
-                              title="Start this task now"
-                            >
-                              {inlineActionTaskId === task.id ? (
-                                <span className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                              ) : (
-                                <span>▶ Start</span>
+                              {task.status === "in-progress" && (
+                                <button
+                                  type="button"
+                                  disabled={inlineActionTaskId === task.id}
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    setInlineActionTaskId(task.id);
+                                    try {
+                                      await submitApproval(task.id);
+                                    } finally {
+                                      setInlineActionTaskId(null);
+                                    }
+                                  }}
+                                  className="inline-flex items-center gap-1 rounded-lg bg-violet-600 px-2.5 py-1 text-xs font-semibold text-white shadow-xs hover:bg-violet-700 active:scale-[0.98] transition-all cursor-pointer disabled:opacity-60"
+                                  title="Submit for admin approval"
+                                >
+                                  {inlineActionTaskId === task.id ? (
+                                    <span className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                                  ) : (
+                                    <span>Submit ➔</span>
+                                  )}
+                                </button>
                               )}
-                            </button>
-                          )}
 
-                          {task.status === "in-progress" && (
-                            <button
-                              type="button"
-                              disabled={inlineActionTaskId === task.id}
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                setInlineActionTaskId(task.id);
-                                try {
-                                  await submitApproval(task.id);
-                                } finally {
-                                  setInlineActionTaskId(null);
-                                }
-                              }}
-                              className="inline-flex items-center gap-1 rounded-lg bg-violet-600 px-2.5 py-1 text-xs font-semibold text-white shadow-xs hover:bg-violet-700 active:scale-[0.98] transition-all cursor-pointer disabled:opacity-60"
-                              title="Submit for admin approval"
-                            >
-                              {inlineActionTaskId === task.id ? (
-                                <span className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                              ) : (
-                                <span>Submit ➔</span>
+                              {task.status === "pending-approval" && (
+                                <button
+                                  type="button"
+                                  disabled={inlineActionTaskId === task.id}
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    setInlineActionTaskId(task.id);
+                                    try {
+                                      await undoSubmission(task.id);
+                                    } finally {
+                                      setInlineActionTaskId(null);
+                                    }
+                                  }}
+                                  className="inline-flex items-center gap-1 rounded-lg bg-zinc-200 dark:bg-zinc-700 hover:bg-zinc-300 dark:hover:bg-zinc-600 px-2.5 py-1 text-xs font-semibold text-zinc-800 dark:text-zinc-200 shadow-xs active:scale-[0.98] transition-all cursor-pointer disabled:opacity-60"
+                                  title="Undo submission and return to In Progress"
+                                >
+                                  {inlineActionTaskId === task.id ? (
+                                    <span className="h-3 w-3 animate-spin rounded-full border-2 border-zinc-700 border-t-transparent" />
+                                  ) : (
+                                    <span>↩ Undo</span>
+                                  )}
+                                </button>
                               )}
-                            </button>
-                          )}
-
-                          {task.status === "pending-approval" && (
-                            <button
-                              type="button"
-                              disabled={inlineActionTaskId === task.id}
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                setInlineActionTaskId(task.id);
-                                try {
-                                  await undoSubmission(task.id);
-                                } finally {
-                                  setInlineActionTaskId(null);
-                                }
-                              }}
-                              className="inline-flex items-center gap-1 rounded-lg bg-zinc-200 dark:bg-zinc-700 hover:bg-zinc-300 dark:hover:bg-zinc-600 px-2.5 py-1 text-xs font-semibold text-zinc-800 dark:text-zinc-200 shadow-xs active:scale-[0.98] transition-all cursor-pointer disabled:opacity-60"
-                              title="Undo submission and return to In Progress"
+                            </>
+                          ) : (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
+                              title="للعرض فقط — التعديل متاح فقط للمعينين على التاسك أو الأدمن أو الأكونت مانجر"
                             >
-                              {inlineActionTaskId === task.id ? (
-                                <span className="h-3 w-3 animate-spin rounded-full border-2 border-zinc-700 border-t-transparent" />
-                              ) : (
-                                <span>↩ Undo</span>
-                              )}
-                            </button>
+                              🔒 للعرض فقط
+                            </span>
                           )}
 
                           <span
@@ -1449,18 +1456,20 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
                             {task.status === "pending-approval" ? "In Review" : task.status}
                           </span>
 
-                          <button
-                            type="button"
-                            onClick={() => openEditModal(task)}
-                            className="rounded-lg p-1.5 text-zinc-400 hover:text-zinc-800 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
-                            title="Edit or Reassign Task"
-                          >
-                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                            </svg>
-                          </button>
+                          {canManageTask(task) && (
+                            <button
+                              type="button"
+                              onClick={() => openEditModal(task)}
+                              className="rounded-lg p-1.5 text-zinc-400 hover:text-zinc-800 dark:hover:text-white hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                              title="Edit or Reassign Task (Manage Access)"
+                            >
+                              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                              </svg>
+                            </button>
+                          )}
 
-                          {(task.createdBy === uid || task.status === "completed") && (
+                          {canManageTask(task) && (task.createdBy === uid || isPrivilegedManager) && (
                             <button
                               type="button"
                               onClick={() => handleDeleteTask(task.id)}
@@ -1490,6 +1499,7 @@ export default function TasksPanel({ db, uid, workerName, onNewAdminMessage }: P
         uid={uid}
         workerName={workerName}
         workers={workers}
+        canManage={canManageTask(activeTask)}
         onClose={() => setActiveTask(null)}
         onStartTask={startTask}
         onSubmitApproval={submitApproval}

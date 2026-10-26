@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import type { Firestore } from "firebase/firestore";
 import { doc, updateDoc } from "firebase/firestore";
 import type { TaskRow, Subtask, WorkerRow } from "@/lib/worker/tasks";
-import { assignedWorkerIds, sanitizeSubtask, sanitizeSubtasks } from "@/lib/worker/tasks";
+import { getTaskAssigneeIds, sanitizeSubtask, sanitizeSubtasks, updateTask } from "@/lib/worker/tasks";
 import TaskChat from "./TaskChat";
 import LinkifiedText from "./LinkifiedText";
 import { toast } from "@/lib/worker/feedback";
@@ -17,6 +17,7 @@ interface Props {
   uid: string;
   workerName: string;
   workers?: WorkerRow[];
+  canManage: boolean;
   onClose: () => void;
   onStartTask: (taskId: string) => Promise<void>;
   onSubmitApproval: (taskId: string) => Promise<void>;
@@ -100,6 +101,7 @@ export default function TaskDetailDrawer({
   uid,
   workerName,
   workers,
+  canManage,
   onClose,
   onStartTask,
   onSubmitApproval,
@@ -120,6 +122,8 @@ export default function TaskDetailDrawer({
   const [editDesc, setEditDesc] = useState("");
   const [editLink, setEditLink] = useState("");
   const [subtasksBusy, setSubtasksBusy] = useState(false);
+  const [selectedNewWorkerId, setSelectedNewWorkerId] = useState("");
+  const [accessBusy, setAccessBusy] = useState(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -136,33 +140,26 @@ export default function TaskDetailDrawer({
   const start = formatStartDate(task.startDate);
   const due = formatDueDate(task.dueDate);
 
-  const assigneeIds = Array.from(
-    new Set(
-      [
-        ...assignedWorkerIds(task.assignedTo),
-        ...(Array.isArray(task.assignedWorkerIds) ? task.assignedWorkerIds : []),
-        ...(task.workerId ? [String(task.workerId)] : []),
-      ].filter(Boolean),
-    ),
-  );
+  const assigneeIds = getTaskAssigneeIds(task);
 
   const isUnassigned =
     assigneeIds.length === 0 &&
     (!task.assignedWorkerName || task.assignedWorkerName.toLowerCase() === "unassigned") &&
     (!task.workerName || (typeof task.workerName === "string" && task.workerName.toLowerCase() === "unassigned"));
 
+  const getWorkerLabel = (id: string) => {
+    if (id === uid) return workerName ? `${workerName} (You)` : "You";
+    const w = (workers || []).find((x) => x.id === id);
+    if (w) {
+      const full = `${w.firstName ?? ""} ${w.lastName ?? ""}`.trim();
+      if (full) return full;
+    }
+    return id;
+  };
+
   const assigneeDisplay = (() => {
     if (assigneeIds.length > 0) {
-      const names = assigneeIds.map((id) => {
-        if (id === uid) return workerName ? `${workerName} (You)` : "You";
-        const w = (workers || []).find((x) => x.id === id);
-        if (w) {
-          const full = `${w.firstName ?? ""} ${w.lastName ?? ""}`.trim();
-          if (full) return full;
-        }
-        return id;
-      });
-      return names.join(", ");
+      return assigneeIds.map(getWorkerLabel).join(", ");
     }
     if (task.assignedWorkerName && task.assignedWorkerName.toLowerCase() !== "unassigned") {
       return task.assignedWorkerName;
@@ -170,14 +167,71 @@ export default function TaskDetailDrawer({
     if (task.workerName && typeof task.workerName === "string" && task.workerName.toLowerCase() !== "unassigned") {
       return task.workerName;
     }
-    return "Unassigned (Open for Claiming)";
+    return "Unassigned";
   })();
+
+  const availableWorkersToAdd = (workers || []).filter(
+    (w) => (!w.status || w.status === "approved") && !assigneeIds.includes(w.id),
+  );
+
+  const handleUpdateAccessAssignees = async (nextIds: string[], addedWorkerId?: string) => {
+    if (!canManage || accessBusy) return;
+    if (nextIds.length === 0) {
+      toast.warning("يجب أن يظل شخص واحد على الأقل معيناً على التاسك");
+      return;
+    }
+    setAccessBusy(true);
+    try {
+      const names = nextIds
+        .map((id) => {
+          const w = (workers || []).find((x) => x.id === id);
+          if (w) return `${w.firstName ?? ""} ${w.lastName ?? ""}`.trim() || id;
+          return id === uid ? workerName || "Worker" : id;
+        })
+        .join(", ");
+      const assignedToVal = nextIds.length === 1 ? nextIds[0] : nextIds;
+      await updateTask(
+        db,
+        task.id,
+        {
+          assignedTo: assignedToVal,
+          assignedWorkerIds: nextIds,
+          assignedWorkerName: names || "Unassigned",
+        },
+        addedWorkerId
+          ? {
+              assignedWorkerIds: [addedWorkerId],
+              senderName: workerName,
+              taskTitle: task.title || "Task",
+              priority: task.priority,
+              currentUid: uid,
+              message: `${workerName || "Team Member"} granted you access & assigned you to task: ${task.title || "Task"}`,
+            }
+          : undefined,
+      );
+      setSelectedNewWorkerId("");
+      onTaskUpdated?.();
+      toast.success(
+        addedWorkerId
+          ? "تم منح الصلاحية وإضافة الموظف للتاسك ✓"
+          : "تم تحديث قائمة المعينين على التاسك ✓",
+      );
+    } catch {
+      toast.error("تعذر تحديث صلاحيات التاسك");
+    } finally {
+      setAccessBusy(false);
+    }
+  };
 
   const subtasksList: Subtask[] = task.subtasks || [];
   const completedSubtasksCount = subtasksList.filter((s) => s.completed).length;
   const subtasksPercent = subtasksList.length > 0 ? Math.round((completedSubtasksCount / subtasksList.length) * 100) : 0;
 
   const handleToggleSubtask = async (subtaskId: string) => {
+    if (!canManage) {
+      toast.warning("🔒 للعرض فقط — التعديل متاح فقط للمعينين على التاسك أو الأدمن أو الأكونت مانجر");
+      return;
+    }
     if (subtasksBusy) return;
     setSubtasksBusy(true);
     try {
@@ -225,6 +279,10 @@ export default function TaskDetailDrawer({
 
   const handleAddSubtask = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canManage) {
+      toast.warning("🔒 للعرض فقط — التعديل متاح فقط للمعينين على التاسك أو الأدمن أو الأكونت مانجر");
+      return;
+    }
     if (!newSubtaskTitle.trim() || subtasksBusy) return;
     setSubtasksBusy(true);
     try {
@@ -276,6 +334,7 @@ export default function TaskDetailDrawer({
   };
 
   const handleStartEditSubtask = (st: Subtask) => {
+    if (!canManage) return;
     setEditingSubtaskId(st.id);
     setEditTitle(st.title);
     setEditDesc(st.description || "");
@@ -283,7 +342,7 @@ export default function TaskDetailDrawer({
   };
 
   const handleSaveEditSubtask = async () => {
-    if (!editingSubtaskId || !editTitle.trim() || subtasksBusy) return;
+    if (!canManage || !editingSubtaskId || !editTitle.trim() || subtasksBusy) return;
     setSubtasksBusy(true);
     try {
       const current = sanitizeSubtasks(task.subtasks);
@@ -320,7 +379,7 @@ export default function TaskDetailDrawer({
   };
 
   const handleDeleteSubtask = async (subtaskId: string) => {
-    if (subtasksBusy) return;
+    if (!canManage || subtasksBusy) return;
     setSubtasksBusy(true);
     try {
       const updated = sanitizeSubtasks(subtasksList.filter((st) => st.id !== subtaskId));
@@ -369,6 +428,15 @@ export default function TaskDetailDrawer({
                   {task.department}
                 </span>
               )}
+              {canManage ? (
+                <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-300">
+                  🔑 لديك صلاحية التعديل (Full Access)
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-800 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-300">
+                  🔒 للعرض فقط (View Only)
+                </span>
+              )}
             </div>
             <h2 className="mt-2 text-lg font-bold text-zinc-900 dark:text-white leading-tight">
               {task.title || "Untitled Task"}
@@ -381,7 +449,7 @@ export default function TaskDetailDrawer({
             )}
           </div>
           <div className="flex items-center gap-1.5">
-            {onEditTask && (
+            {canManage && onEditTask && (
               <button
                 type="button"
                 onClick={() => onEditTask(task)}
@@ -515,110 +583,183 @@ export default function TaskDetailDrawer({
                 <div>
                   <p className="text-xs font-semibold text-zinc-900 dark:text-white">Current Workflow Status</p>
                   <p className="text-[11px] text-zinc-500">
-                    {task.status === "assigned" && "Task is assigned. Click start to begin."}
-                    {task.status === "in-progress" && "You or your team are actively working on this task."}
-                    {task.status === "pending-approval" && "Submitted to admin for review. Need to make adjustments? Click Undo Submission."}
-                    {task.status === "completed" && "Task is approved and marked complete."}
+                    {!canManage
+                      ? "🔒 وضع العرض فقط — يمكنك مشاهدة تفاصيل التاسك، ولا يمكنك التعديل عليها إلا بعد تعيينك عليها من أحد المعينين أو الأدمن أو الأكونت مانجر."
+                      : task.status === "assigned"
+                        ? "Task is assigned. Click start to begin."
+                        : task.status === "in-progress"
+                          ? "You or your team are actively working on this task."
+                          : task.status === "pending-approval"
+                            ? "Submitted to admin for review. Need to make adjustments? Click Undo Submission."
+                            : "Task is approved and marked complete."}
                   </p>
                 </div>
-                <div className="flex gap-2">
-                  {isUnassigned && onClaimTask && (
-                    <button
-                      type="button"
-                      disabled={actionBusy}
-                      onClick={async () => {
-                        setActionBusy(true);
-                        try {
-                          await onClaimTask(task.id);
-                        } finally {
-                          setActionBusy(false);
-                        }
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-red-700 active:scale-[0.98] transition-all cursor-pointer"
-                    >
-                      ✋ Claim Directive
-                    </button>
-                  )}
+                {canManage ? (
+                  <div className="flex gap-2">
+                    {task.status === "assigned" && !isUnassigned && (
+                      <button
+                        type="button"
+                        disabled={actionBusy}
+                        onClick={async () => {
+                          setActionBusy(true);
+                          try {
+                            await onStartTask(task.id);
+                          } finally {
+                            setActionBusy(false);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 active:scale-[0.98] transition-all cursor-pointer"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        Start Task
+                      </button>
+                    )}
 
-                  {task.status === "assigned" && !isUnassigned && (
-                    <button
-                      type="button"
-                      disabled={actionBusy}
-                      onClick={async () => {
-                        setActionBusy(true);
-                        try {
-                          await onStartTask(task.id);
-                        } finally {
-                          setActionBusy(false);
-                        }
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 active:scale-[0.98] transition-all cursor-pointer"
-                    >
-                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      Start Task
-                    </button>
-                  )}
+                    {task.status === "in-progress" && (
+                      <button
+                        type="button"
+                        disabled={actionBusy}
+                        onClick={async () => {
+                          setActionBusy(true);
+                          try {
+                            await onSubmitApproval(task.id);
+                          } finally {
+                            setActionBusy(false);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-amber-700 active:scale-[0.98] transition-all cursor-pointer"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        Submit for Approval
+                      </button>
+                    )}
 
-                  {task.status === "in-progress" && (
-                    <button
-                      type="button"
-                      disabled={actionBusy}
-                      onClick={async () => {
-                        setActionBusy(true);
-                        try {
-                          await onSubmitApproval(task.id);
-                        } finally {
-                          setActionBusy(false);
-                        }
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-amber-700 active:scale-[0.98] transition-all cursor-pointer"
-                    >
-                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      Submit for Approval
-                    </button>
-                  )}
+                    {task.status === "pending-approval" && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1.5 rounded-lg border border-violet-300 bg-violet-50 px-3.5 py-1.5 text-xs font-semibold text-violet-700 dark:border-violet-800 dark:bg-violet-950/60 dark:text-violet-300">
+                          <span className="h-2 w-2 rounded-full bg-violet-500 animate-ping" />
+                          In Admin Review
+                        </span>
+                        {onUndoSubmission && (
+                          <button
+                            type="button"
+                            disabled={actionBusy}
+                            onClick={async () => {
+                              setActionBusy(true);
+                              try {
+                                await onUndoSubmission(task.id);
+                              } finally {
+                                setActionBusy(false);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-lg border-2 border-zinc-900 bg-white px-3.5 py-1.5 text-xs font-bold text-zinc-900 shadow-[2px_2px_0px_0px_#09090b] hover:bg-zinc-100 active:translate-x-0.5 active:translate-y-0.5 transition-all cursor-pointer dark:border-zinc-700 dark:bg-zinc-800 dark:text-white dark:shadow-[2px_2px_0px_0px_#000] disabled:opacity-60"
+                            title="Undo submission and return task to In Progress"
+                          >
+                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a5 5 0 015 5v2m-15-7l4-4m-4 4l4 4" />
+                            </svg>
+                            <span>Undo Submission</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
 
-                  {task.status === "pending-approval" && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="inline-flex items-center gap-1.5 rounded-lg border border-violet-300 bg-violet-50 px-3.5 py-1.5 text-xs font-semibold text-violet-700 dark:border-violet-800 dark:bg-violet-950/60 dark:text-violet-300">
-                        <span className="h-2 w-2 rounded-full bg-violet-500 animate-ping" />
-                        In Admin Review
+                    {task.status === "completed" && (
+                      <span className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 px-3.5 py-1.5 text-xs font-semibold text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
+                        <span>✅</span> Approved &amp; Done
                       </span>
-                      {onUndoSubmission && (
-                        <button
-                          type="button"
-                          disabled={actionBusy}
-                          onClick={async () => {
-                            setActionBusy(true);
-                            try {
-                              await onUndoSubmission(task.id);
-                            } finally {
-                              setActionBusy(false);
-                            }
-                          }}
-                          className="inline-flex items-center gap-1.5 rounded-lg border-2 border-zinc-900 bg-white px-3.5 py-1.5 text-xs font-bold text-zinc-900 shadow-[2px_2px_0px_0px_#09090b] hover:bg-zinc-100 active:translate-x-0.5 active:translate-y-0.5 transition-all cursor-pointer dark:border-zinc-700 dark:bg-zinc-800 dark:text-white dark:shadow-[2px_2px_0px_0px_#000] disabled:opacity-60"
-                          title="Undo submission and return task to In Progress"
-                        >
-                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a5 5 0 015 5v2m-15-7l4-4m-4 4l4 4" />
-                          </svg>
-                          <span>Undo Submission</span>
-                        </button>
-                      )}
-                    </div>
-                  )}
+                    )}
+                  </div>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-800 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                    🔒 للعرض فقط (غير معين)
+                  </span>
+                )}
+              </div>
 
-                  {task.status === "completed" && (
-                    <span className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 px-3.5 py-1.5 text-xs font-semibold text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
-                      <span>✅</span> Approved &amp; Done
+              {/* ── Task Access & Assignees Manager ── */}
+              <div className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-800/80 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm">🔑</span>
+                    <div>
+                      <h3 className="text-xs font-bold text-zinc-900 dark:text-white">
+                        صلاحيات الوصول والمشاركين في التاسك (Task Access &amp; Assignees)
+                      </h3>
+                      <p className="text-[11px] text-zinc-500">
+                        {canManage
+                          ? "بصفتك معيناً على هذه المهمة (أو أدمن / أكونت مانجر)، يمكنك إضافة زملائك لمنحهم صلاحية التعديل والعمل عليها."
+                          : "الأشخاص المذكورون أدناه (أو الأدمن أو الأكونت مانجر) هم فقط من يملكون صلاحية التعديل أو إضافتك للتاسك."}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Current Assignees Chips */}
+                <div className="flex flex-wrap items-center gap-2">
+                  {assigneeIds.length === 0 ? (
+                    <span className="rounded-lg bg-amber-50 border border-amber-200 px-2.5 py-1 text-xs font-semibold text-amber-800 dark:bg-amber-950/50 dark:border-amber-900 dark:text-amber-300">
+                      لا يوجد موظفون معينون حالياً ({assigneeDisplay})
                     </span>
+                  ) : (
+                    assigneeIds.map((wId) => (
+                      <span
+                        key={wId}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-xs font-semibold text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                      >
+                        <span>👤 {getWorkerLabel(wId)}</span>
+                        {canManage && assigneeIds.length > 1 && (
+                          <button
+                            type="button"
+                            disabled={accessBusy}
+                            onClick={() =>
+                              void handleUpdateAccessAssignees(assigneeIds.filter((id) => id !== wId))
+                            }
+                            className="ml-1 rounded text-zinc-400 hover:text-red-600 cursor-pointer font-bold"
+                            title="إزالة الصلاحية من هذا الموظف"
+                          >
+                            &times;
+                          </button>
+                        )}
+                      </span>
+                    ))
                   )}
                 </div>
+
+                {/* Quick Grant Access Picker (only for Assigned Workers / Admin / Account Manager) */}
+                {canManage && availableWorkersToAdd.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-zinc-100 dark:border-zinc-700/60">
+                    <select
+                      value={selectedNewWorkerId}
+                      onChange={(e) => setSelectedNewWorkerId(e.target.value)}
+                      className="flex-1 min-w-[200px] rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5 text-xs text-zinc-900 dark:text-white focus:border-red-500 focus:outline-none"
+                    >
+                      <option value="">+ اختر موظفاً لمنحه صلاحية التعديل على التاسك (Assign)…</option>
+                      {availableWorkersToAdd.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {w.firstName} {w.lastName} {w.role ? `(${w.role})` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      disabled={!selectedNewWorkerId || accessBusy}
+                      onClick={() => {
+                        if (!selectedNewWorkerId) return;
+                        const next = Array.from(new Set([...assigneeIds, selectedNewWorkerId]));
+                        void handleUpdateAccessAssignees(next, selectedNewWorkerId);
+                      }}
+                      className="rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-50 px-3.5 py-1.5 text-xs font-bold text-white cursor-pointer transition-colors"
+                    >
+                      {accessBusy ? "جاري الإضافة…" : "+ منح صلاحية وتعيين"}
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Start Date, Deadline & Meta Grid */}
@@ -760,12 +901,13 @@ export default function TaskDetailDrawer({
                         }`}
                       >
                         <div className="flex items-start justify-between gap-2.5">
-                          <label className="flex items-start gap-2.5 flex-1 min-w-0 cursor-pointer select-none">
+                          <label className={`flex items-start gap-2.5 flex-1 min-w-0 select-none ${canManage ? "cursor-pointer" : "cursor-default"}`}>
                             <input
                               type="checkbox"
                               checked={st.completed}
+                              disabled={!canManage}
                               onChange={() => handleToggleSubtask(st.id)}
-                              className="accent-emerald-600 w-4 h-4 mt-0.5 cursor-pointer rounded shrink-0"
+                              className={`accent-emerald-600 w-4 h-4 mt-0.5 rounded shrink-0 ${canManage ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
                             />
                             <div className="flex-1 min-w-0">
                               <span
@@ -803,72 +945,78 @@ export default function TaskDetailDrawer({
                               )}
                             </div>
                           </label>
-                          <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button
-                              type="button"
-                              onClick={() => handleStartEditSubtask(st)}
-                              className="p-1 text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-zinc-800 rounded text-xs cursor-pointer transition-colors"
-                              title="Edit subtask"
-                            >
-                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                              </svg>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteSubtask(st.id)}
-                              className="p-1 text-zinc-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 rounded text-xs cursor-pointer transition-colors"
-                              title="Delete subtask"
-                            >
-                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                              </svg>
-                            </button>
-                          </div>
+                          {canManage && (
+                            <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button
+                                type="button"
+                                onClick={() => handleStartEditSubtask(st)}
+                                className="p-1 text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-zinc-800 rounded text-xs cursor-pointer transition-colors"
+                                title="Edit subtask"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                                </svg>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteSubtask(st.id)}
+                                className="p-1 text-zinc-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 rounded text-xs cursor-pointer transition-colors"
+                                title="Delete subtask"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                     );
                   })}
 
                   {subtasksList.length === 0 && (
-                    <p className="text-xs text-zinc-400 italic py-1">No checklist items yet. Add one below.</p>
+                    <p className="text-xs text-zinc-400 italic py-1">
+                      {canManage ? "No checklist items yet. Add one below." : "No checklist items."}
+                    </p>
                   )}
                 </div>
 
-                {/* Add Subtask Input Form */}
-                <form onSubmit={handleAddSubtask} className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg p-3 space-y-2">
-                  <input
-                    value={newSubtaskTitle}
-                    onChange={(e) => setNewSubtaskTitle(e.target.value)}
-                    placeholder="+ Subtask title (required)…"
-                    className="w-full rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-1.5 text-xs text-zinc-900 dark:text-white placeholder:text-zinc-400 focus:border-red-500 focus:outline-none"
-                  />
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {/* Add Subtask Input Form (Only when user has access) */}
+                {canManage && (
+                  <form onSubmit={handleAddSubtask} className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg p-3 space-y-2">
                     <input
-                      type="text"
-                      value={newSubtaskDesc}
-                      onChange={(e) => setNewSubtaskDesc(e.target.value)}
-                      placeholder="Description / notes (optional)…"
-                      className="rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-1.5 text-[11px] text-zinc-700 dark:text-zinc-300 placeholder:text-zinc-400 focus:border-red-500 focus:outline-none"
+                      value={newSubtaskTitle}
+                      onChange={(e) => setNewSubtaskTitle(e.target.value)}
+                      placeholder="+ Subtask title (required)…"
+                      className="w-full rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-1.5 text-xs text-zinc-900 dark:text-white placeholder:text-zinc-400 focus:border-red-500 focus:outline-none"
                     />
-                    <input
-                      type="text"
-                      value={newSubtaskLink}
-                      onChange={(e) => setNewSubtaskLink(e.target.value)}
-                      placeholder="Link URL (e.g. figma.com/..., optional)…"
-                      className="rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-1.5 text-[11px] text-zinc-700 dark:text-zinc-300 placeholder:text-zinc-400 focus:border-red-500 focus:outline-none"
-                    />
-                  </div>
-                  <div className="flex justify-end pt-0.5">
-                    <button
-                      type="submit"
-                      disabled={!newSubtaskTitle.trim() || subtasksBusy}
-                      className="rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-zinc-800 disabled:opacity-50 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200 cursor-pointer transition-colors"
-                    >
-                      + Add Subtask
-                    </button>
-                  </div>
-                </form>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <input
+                        type="text"
+                        value={newSubtaskDesc}
+                        onChange={(e) => setNewSubtaskDesc(e.target.value)}
+                        placeholder="Description / notes (optional)…"
+                        className="rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-1.5 text-[11px] text-zinc-700 dark:text-zinc-300 placeholder:text-zinc-400 focus:border-red-500 focus:outline-none"
+                      />
+                      <input
+                        type="text"
+                        value={newSubtaskLink}
+                        onChange={(e) => setNewSubtaskLink(e.target.value)}
+                        placeholder="Link URL (e.g. figma.com/..., optional)…"
+                        className="rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-3 py-1.5 text-[11px] text-zinc-700 dark:text-zinc-300 placeholder:text-zinc-400 focus:border-red-500 focus:outline-none"
+                      />
+                    </div>
+                    <div className="flex justify-end pt-0.5">
+                      <button
+                        type="submit"
+                        disabled={!newSubtaskTitle.trim() || subtasksBusy}
+                        className="rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-zinc-800 disabled:opacity-50 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200 cursor-pointer transition-colors"
+                      >
+                        + Add Subtask
+                      </button>
+                    </div>
+                  </form>
+                )}
               </div>
 
               {/* Description */}
@@ -928,7 +1076,7 @@ export default function TaskDetailDrawer({
             <span>{activeTab === "details" ? "Open Chat" : "Back to Details"}</span>
           </button>
           <div className="flex items-center gap-2">
-            {onEditTask && (
+            {canManage && onEditTask && (
               <button
                 type="button"
                 onClick={() => onEditTask(task)}

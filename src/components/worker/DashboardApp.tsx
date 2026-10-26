@@ -60,7 +60,7 @@ import {
   markSessionIdle,
   type WorkSessionState,
 } from "@/lib/worker/session";
-import type { TaskRow } from "@/lib/worker/tasks";
+import { getTaskAssigneeIds, type TaskRow } from "@/lib/worker/tasks";
 import { useReducedMotion } from "@/hooks/useReducedMotion";
 import TasksPanel from "./TasksPanel";
 import ActiveCheckInModal from "./ActiveCheckInModal";
@@ -1681,12 +1681,7 @@ export default function DashboardApp() {
     let prevStatus = new Map<string, string>();
 
     const isTaskAssignedToUid = (data: Record<string, unknown>): boolean => {
-      const assignedTo = data.assignedTo;
-      if (typeof assignedTo === "string" && assignedTo === uid) return true;
-      if (Array.isArray(assignedTo) && assignedTo.includes(uid)) return true;
-      if (Array.isArray(data.assignedWorkerIds) && data.assignedWorkerIds.includes(uid)) return true;
-      if (data.workerId === uid) return true;
-      return false;
+      return getTaskAssigneeIds(data as unknown as TaskRow).includes(uid);
     };
 
     const unsub = registerUnsub(onSnapshot(q, (snap) => {
@@ -2711,6 +2706,8 @@ export default function DashboardApp() {
               db={firebaseClient.db}
               uid={uid}
               workerName={`${profile.firstName ?? ""} ${profile.lastName ?? ""}`.trim() || uid}
+              workerEmail={profile.email}
+              workerRole={profile.role}
               onNewAdminMessage={handleNewAdminMessage}
             />
           </section>

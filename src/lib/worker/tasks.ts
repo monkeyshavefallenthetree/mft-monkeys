@@ -93,9 +93,91 @@ export async function loadAllWorkers(db: Firestore): Promise<WorkerRow[]> {
 
 export function assignedWorkerIds(assignedTo: string | string[] | undefined | null): string[] {
   if (!assignedTo) return [];
-  if (Array.isArray(assignedTo)) return assignedTo.filter(Boolean);
-  if (typeof assignedTo === "string") return [assignedTo];
+  if (Array.isArray(assignedTo)) return assignedTo.filter((x) => Boolean(x) && String(x).toLowerCase() !== "unassigned");
+  if (typeof assignedTo === "string") {
+    const trimmed = assignedTo.trim();
+    if (!trimmed || trimmed.toLowerCase() === "unassigned") return [];
+    return [trimmed];
+  }
   return [];
+}
+
+/**
+ * Extracts all assigned worker UIDs for a task.
+ * Prefers `assignedTo` when explicitly present so removals from Admin or Worker portal are respected.
+ */
+export function getTaskAssigneeIds(task: TaskRow | null | undefined): string[] {
+  if (!task) return [];
+  const fromAssignedTo = assignedWorkerIds(task.assignedTo);
+  if (fromAssignedTo.length > 0) {
+    return Array.from(new Set(fromAssignedTo));
+  }
+  // If assignedTo was explicitly set to empty string or empty array (unassigned), respect it if assignedWorkerIds is also empty
+  if (Array.isArray(task.assignedWorkerIds) && task.assignedWorkerIds.length > 0 && task.assignedTo === undefined) {
+    return Array.from(new Set(task.assignedWorkerIds.map(String).filter(Boolean)));
+  }
+  if (Array.isArray(task.assignedWorkerIds) && task.assignedWorkerIds.length > 0 && fromAssignedTo.length === 0) {
+    // Also include assignedWorkerIds if assignedTo was not an empty clear
+    const rawAssignedTo = task.assignedTo;
+    if (rawAssignedTo !== "" && !(Array.isArray(rawAssignedTo) && rawAssignedTo.length === 0)) {
+      return Array.from(new Set(task.assignedWorkerIds.map(String).filter(Boolean)));
+    }
+  }
+  if (task.workerId && typeof task.workerId === "string" && task.workerId.toLowerCase() !== "unassigned" && !task.assignedTo) {
+    return [task.workerId];
+  }
+  return [];
+}
+
+const ADMIN_OR_ACCOUNT_MANAGER_EMAILS = new Set([
+  "admin@mft.com",
+  "mayamahmoud@mft.com",
+  "hr@mft.com",
+]);
+
+const ADMIN_OR_ACCOUNT_MANAGER_ROLES = new Set([
+  "super_admin",
+  "ops_admin",
+  "admin",
+  "account_manager",
+  "account-manager",
+  "account manager",
+]);
+
+/**
+ * Returns true if the worker profile belongs to an Admin or Account Manager.
+ */
+export function isWorkerAdminOrAccountManager(
+  user?: { email?: string | null; role?: string | null } | null,
+): boolean {
+  if (!user) return false;
+  const email = (user.email || "").trim().toLowerCase();
+  if (email && ADMIN_OR_ACCOUNT_MANAGER_EMAILS.has(email)) return true;
+  const role = (user.role || "").trim().toLowerCase();
+  if (role && ADMIN_OR_ACCOUNT_MANAGER_ROLES.has(role)) return true;
+  if (role.includes("account manager") || role.includes("account-manager") || role.includes("account_manager")) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Determines whether the current user has edit & access-management permissions on a task.
+ * Only:
+ *  1) Workers currently assigned to the task (`assignedTo` / `assignedWorkerIds`)
+ *  2) Admin or Account Manager
+ * can edit the task, change its status/checklist, or grant/change access (assign other workers).
+ * All other workers have View-Only access until assigned by an assignee, Admin, or Account Manager.
+ */
+export function canUserManageTask(
+  task: TaskRow | null | undefined,
+  uid: string | null | undefined,
+  user?: { email?: string | null; role?: string | null } | null,
+): boolean {
+  if (!task || !uid) return false;
+  if (isWorkerAdminOrAccountManager(user)) return true;
+  const assignees = getTaskAssigneeIds(task);
+  return assignees.includes(uid);
 }
 
 /** Loads all tasks if accessible, or falls back to tasks assigned to or created by the worker. */
@@ -159,6 +241,7 @@ export async function createTask(
     department: data.department || "general",
     photo: data.photo?.trim() || null,
     assignedTo: data.assignedTo ?? "",
+    assignedWorkerIds: data.assignedWorkerIds ?? assignedWorkerIds(data.assignedTo),
     assignedWorkerName: data.assignedWorkerName || "Unassigned",
     priority: data.priority || "medium",
     status: "assigned",

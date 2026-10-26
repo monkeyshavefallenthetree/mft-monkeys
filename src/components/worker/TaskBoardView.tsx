@@ -4,6 +4,7 @@ import type { TaskRow } from "@/lib/worker/tasks";
 
 interface Props {
   tasks: TaskRow[];
+  canManageTask?: (task: TaskRow) => boolean;
   onSelectTask: (task: TaskRow) => void;
   onStartTask: (taskId: string) => Promise<void>;
   onSubmitApproval: (taskId: string) => Promise<void>;
@@ -62,6 +63,7 @@ function formatStart(val: unknown): string | null {
 
 export default function TaskBoardView({
   tasks,
+  canManageTask,
   onSelectTask,
   onStartTask,
   onSubmitApproval,
@@ -101,6 +103,7 @@ export default function TaskBoardView({
                   const start = formatStart(t.startDate);
                   const due = formatDue(t.dueDate);
                   const isRejected = t.status === "in-progress" && Boolean(t.rejectionReason);
+                  const canManage = canManageTask ? canManageTask(t) : false;
 
                   return (
                     <div
@@ -177,35 +180,46 @@ export default function TaskBoardView({
                           ) : null}
                         </div>
 
-                        {/* Quick action button inside card */}
+                        {/* Quick action button inside card (only if user has access to manage task) */}
                         <div onClick={(e) => e.stopPropagation()}>
-                          {t.status === "assigned" && (
-                            <button
-                              type="button"
-                              onClick={() => void onStartTask(t.id)}
-                              className="rounded bg-emerald-50 px-2 py-1 text-[10px] font-bold text-emerald-700 hover:bg-emerald-600 hover:text-white dark:bg-emerald-950/60 dark:text-emerald-400 transition-colors cursor-pointer"
+                          {canManage ? (
+                            <>
+                              {t.status === "assigned" && (
+                                <button
+                                  type="button"
+                                  onClick={() => void onStartTask(t.id)}
+                                  className="rounded bg-emerald-50 px-2 py-1 text-[10px] font-bold text-emerald-700 hover:bg-emerald-600 hover:text-white dark:bg-emerald-950/60 dark:text-emerald-400 transition-colors cursor-pointer"
+                                >
+                                  Start →
+                                </button>
+                              )}
+                              {t.status === "in-progress" && (
+                                <button
+                                  type="button"
+                                  onClick={() => void onSubmitApproval(t.id)}
+                                  className="rounded bg-amber-50 px-2 py-1 text-[10px] font-bold text-amber-700 hover:bg-amber-600 hover:text-white dark:bg-amber-950/60 dark:text-amber-400 transition-colors cursor-pointer"
+                                >
+                                  Submit →
+                                </button>
+                              )}
+                              {t.status === "pending-approval" && onUndoSubmission && (
+                                <button
+                                  type="button"
+                                  onClick={() => void onUndoSubmission(t.id)}
+                                  className="rounded bg-violet-100 px-2 py-1 text-[10px] font-bold text-violet-700 hover:bg-violet-600 hover:text-white dark:bg-violet-950/80 dark:text-violet-300 dark:hover:bg-violet-700 transition-colors cursor-pointer inline-flex items-center gap-0.5"
+                                  title="Revert task back to In Progress"
+                                >
+                                  <span>↩</span> Undo
+                                </button>
+                              )}
+                            </>
+                          ) : (
+                            <span
+                              className="inline-flex items-center gap-1 rounded bg-zinc-100 dark:bg-zinc-900 px-1.5 py-0.5 text-[9px] font-semibold text-zinc-500 dark:text-zinc-400"
+                              title="View Only — You must be assigned to edit this task"
                             >
-                              Start →
-                            </button>
-                          )}
-                          {t.status === "in-progress" && (
-                            <button
-                              type="button"
-                              onClick={() => void onSubmitApproval(t.id)}
-                              className="rounded bg-amber-50 px-2 py-1 text-[10px] font-bold text-amber-700 hover:bg-amber-600 hover:text-white dark:bg-amber-950/60 dark:text-amber-400 transition-colors cursor-pointer"
-                            >
-                              Submit →
-                            </button>
-                          )}
-                          {t.status === "pending-approval" && onUndoSubmission && (
-                            <button
-                              type="button"
-                              onClick={() => void onUndoSubmission(t.id)}
-                              className="rounded bg-violet-100 px-2 py-1 text-[10px] font-bold text-violet-700 hover:bg-violet-600 hover:text-white dark:bg-violet-950/80 dark:text-violet-300 dark:hover:bg-violet-700 transition-colors cursor-pointer inline-flex items-center gap-0.5"
-                              title="Revert task back to In Progress"
-                            >
-                              <span>↩</span> Undo
-                            </button>
+                              🔒 View Only
+                            </span>
                           )}
                         </div>
                       </div>
