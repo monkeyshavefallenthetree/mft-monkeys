@@ -17,6 +17,13 @@ export interface WorkLocationItem {
   active?: boolean;
 }
 
+export interface OfficeNetworkItem {
+  id: string;
+  name: string; // e.g. "راوتر المقر الرئيسي"
+  ip: string; // e.g. "197.52.104.88" or "197.52.104.*"
+  active?: boolean;
+}
+
 export interface HrSettings extends Policy2026SettingsFields {
   monthStartDay: number; // 1 - 28 (e.g. 21 for 21st to 20th cycle)
   weekendDays: number[]; // e.g. [5, 6] for Friday & Saturday
@@ -29,6 +36,18 @@ export interface HrSettings extends Policy2026SettingsFields {
   absencePenaltyMultiplier: number; // 2.0
   workLocations?: WorkLocationItem[];
   enforceGeofence?: boolean;
+  /** Allowed company Wi-Fi / Public IPs so desktop PCs without GPS can clock in automatically. */
+  officeNetworks?: OfficeNetworkItem[];
+  /** Allow workers inside the office without GPS to clock in using the Office PIN. */
+  officePinEnabled?: boolean;
+  /** "daily_auto" rotates automatically every day; "fixed" uses officePinFixedCode. */
+  officePinMode?: "daily_auto" | "fixed";
+  /** Custom fixed PIN set by Admin when officePinMode === "fixed". */
+  officePinFixedCode?: string;
+  /** Secret salt used to derive the daily PIN (Admin can rotate at any time). */
+  officePinSalt?: string;
+  /** Master setup code to authorize a desktop browser as a Trusted Office PC. */
+  officeDeviceAuthSecret?: string;
 }
 
 // Kept in sync with mft-admin DEFAULT_HR_SETTINGS (used only until `settings/hr` loads).
@@ -44,9 +63,185 @@ export const DEFAULT_HR_SETTINGS: HrSettings = {
   absencePenaltyMultiplier: 2.0,
   workLocations: [],
   enforceGeofence: true,
+  officeNetworks: [],
+  officePinEnabled: true,
+  officePinMode: "daily_auto",
+  officePinFixedCode: "2026",
+  officePinSalt: "mft_office_pin_2026",
+  officeDeviceAuthSecret: "MFT-OFFICE-2026",
   // HR-POL-2026 (off until enabled by an admin)
   ...POLICY_2026_SETTINGS_DEFAULTS,
 };
+
+const TRUSTED_OFFICE_PC_STORAGE_KEY = "mft_trusted_office_pc_v1";
+
+function normalizeDigits(str: string): string {
+  return str
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .trim();
+}
+
+export function getLocalYmdForPin(d = new Date()): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Computes the active Office Check-In PIN for a given YYYY-MM-DD date.
+ */
+export function computeDailyOfficePin(
+  settings?: Partial<HrSettings>,
+  dateYmd: string = getLocalYmdForPin(),
+): string {
+  if (settings?.officePinMode === "fixed") {
+    const fixed = normalizeDigits(settings?.officePinFixedCode || "");
+    if (fixed.length >= 4) return fixed;
+  }
+  const salt = (settings?.officePinSalt || "mft_office_pin_2026").trim();
+  const seed = `${dateYmd}::${salt}`;
+  let hash = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  const pinNum = 1000 + (Math.abs(hash) % 9000);
+  return String(pinNum);
+}
+
+/**
+ * Verifies a worker-entered Office PIN against today's expected PIN.
+ */
+export function verifyOfficePinInput(
+  inputPin: string,
+  settings?: Partial<HrSettings>,
+  dateYmd: string = getLocalYmdForPin(),
+): boolean {
+  if (settings?.officePinEnabled === false) return false;
+  const cleaned = normalizeDigits(inputPin || "");
+  if (!cleaned) return false;
+  const expected = computeDailyOfficePin(settings, dateYmd);
+  if (cleaned === expected) return true;
+  if (settings?.officePinMode === "fixed" && settings?.officePinFixedCode) {
+    return cleaned === normalizeDigits(settings.officePinFixedCode);
+  }
+  return false;
+}
+
+export function markOfficePinVerifiedForToday(uid: string, dateYmd: string = getLocalYmdForPin()): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(`mft_office_pin_ok_${uid}_${dateYmd}`, "1");
+  } catch {
+    /* ignore */
+  }
+}
+
+export function hasVerifiedOfficePinToday(uid: string, dateYmd: string = getLocalYmdForPin()): boolean {
+  if (typeof window === "undefined" || !uid) return false;
+  try {
+    return localStorage.getItem(`mft_office_pin_ok_${uid}_${dateYmd}`) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks if this browser is authorized as a permanent Trusted Office PC.
+ */
+export function isTrustedOfficePc(settings?: Partial<HrSettings>): { trusted: boolean; label?: string } {
+  if (typeof window === "undefined") return { trusted: false };
+  try {
+    const raw = localStorage.getItem(TRUSTED_OFFICE_PC_STORAGE_KEY);
+    if (!raw) return { trusted: false };
+    const parsed = JSON.parse(raw) as { secret?: string; label?: string };
+    const expected = normalizeDigits(settings?.officeDeviceAuthSecret || "MFT-OFFICE-2026").toUpperCase();
+    const actual = normalizeDigits(parsed?.secret || "").toUpperCase();
+    if (actual && actual === expected) {
+      return { trusted: true, label: parsed.label || "جهاز كمبيوتر الشركة" };
+    }
+  } catch {
+    /* ignore */
+  }
+  return { trusted: false };
+}
+
+/**
+ * Authorizes the current browser as a Trusted Office PC using the Admin's setup code.
+ */
+export function authorizeTrustedOfficePc(
+  inputCode: string,
+  deviceLabel: string,
+  settings?: Partial<HrSettings>,
+): boolean {
+  if (typeof window === "undefined") return false;
+  const expected = normalizeDigits(settings?.officeDeviceAuthSecret || "MFT-OFFICE-2026").toUpperCase();
+  const actual = normalizeDigits(inputCode || "").toUpperCase();
+  if (!actual || actual !== expected) return false;
+  try {
+    localStorage.setItem(
+      TRUSTED_OFFICE_PC_STORAGE_KEY,
+      JSON.stringify({
+        secret: settings?.officeDeviceAuthSecret || "MFT-OFFICE-2026",
+        label: deviceLabel.trim() || "جهاز كمبيوتر الشركة",
+        authorizedAt: new Date().toISOString(),
+      }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fetches the client's current Public IP address.
+ */
+export async function fetchClientPublicIp(): Promise<string | null> {
+  try {
+    const res = await fetch("/api/client-ip", { cache: "no-store" });
+    if (res.ok) {
+      const data = (await res.json()) as { ip?: string | null };
+      if (data?.ip) return data.ip.trim();
+    }
+  } catch {
+    /* fallback below */
+  }
+  try {
+    const res = await fetch("https://api.ipify.org?format=json", { cache: "no-store" });
+    if (res.ok) {
+      const data = (await res.json()) as { ip?: string };
+      if (data?.ip) return data.ip.trim();
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/**
+ * Checks if a client IP matches any active configured Office Network IP / prefix.
+ */
+export function matchOfficeNetworkIp(
+  clientIp: string | null | undefined,
+  settings?: Partial<HrSettings>,
+): OfficeNetworkItem | null {
+  const ip = (clientIp || "").trim();
+  if (!ip) return null;
+  const activeNets = (settings?.officeNetworks ?? []).filter(
+    (n) => n.active !== false && Boolean(n.ip?.trim()),
+  );
+  for (const net of activeNets) {
+    const pat = net.ip.trim();
+    if (pat === ip) return net;
+    if (pat.endsWith("*")) {
+      const prefix = pat.replace(/\*+$/, "");
+      if (prefix && ip.startsWith(prefix)) return net;
+    }
+  }
+  return null;
+}
 
 export interface GeofenceCheckResult {
   enforced: boolean;

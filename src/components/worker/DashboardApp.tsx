@@ -33,9 +33,13 @@ import {
   DEFAULT_HR_SETTINGS,
   evaluateWorkerGeofence,
   evaluateWorkerLateness,
+  fetchClientPublicIp,
   formatTimeAmPm,
   getPayrollCycleRange,
+  hasVerifiedOfficePinToday,
   isDateHoliday,
+  isTrustedOfficePc,
+  matchOfficeNetworkIp,
   subscribeHolidays,
   subscribeHrSettings,
   subscribeWorkerPayrollAdjustments,
@@ -607,10 +611,34 @@ export default function DashboardApp() {
           x.status === "approved",
       );
 
-      if (geofenceEnforced && !hasApprovedTodayMission) {
+      // Non-GPS Office Verification Channels (for desktop PCs & devices inside the company without GPS):
+      // 1) Worker already verified today's Office PIN
+      const verifiedByOfficePin = hasVerifiedOfficePinToday(uid, todayStr);
+      // 2) This computer browser is authorized as a stationary Trusted Office PC
+      const trustedPc = isTrustedOfficePc(hrSettings);
+      // 3) Device is connected to an approved Company Wi-Fi / Public IP
+      let verifiedByOfficeIp = false;
+      if (
+        geofenceEnforced &&
+        !hasApprovedTodayMission &&
+        !verifiedByOfficePin &&
+        !trustedPc.trusted &&
+        (hrSettings.officeNetworks ?? []).some((n) => n.active !== false && Boolean(n.ip?.trim()))
+      ) {
+        const clientIp = await fetchClientPublicIp();
+        const matchedNet = matchOfficeNetworkIp(clientIp, hrSettings);
+        if (matchedNet) {
+          verifiedByOfficeIp = true;
+        }
+      }
+
+      const bypassedByOfficeAuth =
+        hasApprovedTodayMission || verifiedByOfficePin || trustedPc.trusted || verifiedByOfficeIp;
+
+      if (geofenceEnforced && !bypassedByOfficeAuth) {
         if (typeof navigator === "undefined" || !navigator.geolocation) {
           setLastGpsError(
-            "المتصفح لا يدعم تحديد الموقع الجغرافي (GPS) — لا يمكن بدء الشيفت العادي، يرجى إرسال طلب مأمورية خارجية.",
+            "هذا الجهاز لا يدعم الـ GPS — إذا كنت داخل مقر الشركة استخدم «كود حضور المكتب» بالأسفل، أو أرسل طلب مأمورية خارجية.",
           );
           setLastGeofenceResult(null);
           setShowShiftChoiceModal(false);
@@ -625,8 +653,8 @@ export default function DashboardApp() {
             (err) => {
               setLastGpsError(
                 err.code === 1
-                  ? "يرجى السماح بصلاحية الموقع الجغرافي (Location Permission) للتحقق من تواجدك داخل موقع العمل، أو أرسل طلب مأمورية خارجية بالأسفل."
-                  : "تعذر تحديد موقعك الحالي عبر الـ GPS — تأكد من تفعيل الموقع أو أرسل طلب مأمورية خارجية.",
+                  ? "يرجى السماح بصلاحية الموقع الجغرافي (Location Permission)، أو إذا كنت على جهاز كمبيوتر داخل الشركة استخدم «كود حضور المكتب» بالأسفل."
+                  : "تعذر تحديد موقعك عبر الـ GPS — إذا كنت داخل الشركة استخدم «كود حضور المكتب» بالأسفل، أو أرسل طلب مأمورية خارجية.",
               );
               resolve(null);
             },
@@ -639,7 +667,7 @@ export default function DashboardApp() {
           setShowShiftChoiceModal(false);
           setOutsideLocationModalOpen(true);
           setShiftBusy(false);
-          toast.warning("📍 لا يمكن بدء الشيفت العادي بدون التحقق من اللوكيشن أو اعتماد مأمورية خارجية");
+          toast.warning("📍 أدخل كود حضور المكتب (إذا كنت داخل الشركة بدون GPS) أو أرسل طلب مأمورية خارجية");
           return;
         }
 
@@ -653,9 +681,9 @@ export default function DashboardApp() {
           setShowShiftChoiceModal(false);
           setOutsideLocationModalOpen(true);
           setShiftBusy(false);
-          toast.warning("📍 أنت خارج موقع العمل المعتمد — أرسل طلب مأمورية لبدء العمل", {
+          toast.warning("📍 إذا كنت على كمبيوتر داخل الشركة أدخل «كود المكتب»، أو أرسل طلب مأمورية خارجية", {
             description: geoCheck.nearestLocation
-              ? `أقرب موقع عمل (${geoCheck.nearestLocation.name}) يبعد عنك ${geoCheck.distanceMeters} متر.`
+              ? `أقرب موقع عمل (${geoCheck.nearestLocation.name}) يبعد عن موقع الـ GPS الحالي ${geoCheck.distanceMeters} متر.`
               : undefined,
           });
           return;
@@ -4321,7 +4349,7 @@ export default function DashboardApp() {
 
             {(hrSettings.workLocations ?? []).some((l) => l.active !== false) && (
               <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-purple-200 bg-purple-50/70 px-3.5 py-2.5 text-xs text-purple-900 dark:border-purple-900/60 dark:bg-purple-950/30 dark:text-purple-200">
-                <span>📍 هل أنت خارج موقع العمل في مأمورية خارجية؟</span>
+                <span>📍 جهازك بدون GPS داخل الشركة أو في مأمورية خارجية؟</span>
                 <button
                   type="button"
                   onClick={() => {
@@ -4330,7 +4358,7 @@ export default function DashboardApp() {
                   }}
                   className="rounded-lg bg-purple-600 px-3 py-1 text-[11px] font-bold text-white hover:bg-purple-700 cursor-pointer"
                 >
-                  🚗 إرسال طلب مأمورية (بساعات وسكرين شوت)
+                  🏢 كود المكتب (بدون GPS) / 🚗 طلب مأمورية
                 </button>
               </div>
             )}
@@ -4657,6 +4685,7 @@ export default function DashboardApp() {
         uid={uid}
         workerName={`${profile.firstName ?? ""} ${profile.lastName ?? ""}`.trim() || (profile.email ?? "Worker")}
         workerEmail={profile.email ?? ""}
+        hrSettings={hrSettings}
         geofenceResult={lastGeofenceResult}
         gpsError={lastGpsError}
         workerCoords={lastWorkerCoords}
