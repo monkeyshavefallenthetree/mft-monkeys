@@ -1,10 +1,10 @@
 import {
-  addDoc,
   collection,
   doc,
   getDocs,
   query,
   serverTimestamp,
+  setDoc,
   updateDoc,
   where,
   arrayUnion,
@@ -53,7 +53,16 @@ export async function initWorkSession(
   const today = localYmd(now);
   const fullName = `${worker.firstName ?? ""} ${worker.lastName ?? ""}`.trim() || worker.email || "Team Member";
 
-  const selectedTasks = shiftPlan?.selectedTasks ?? [];
+  const selectedTasks = (shiftPlan?.selectedTasks ?? []).map((t) => {
+    const item: { id: string; title: string; projectName?: string } = {
+      id: String(t.id || ""),
+      title: String(t.title || "Untitled Task"),
+    };
+    if (t.projectName) {
+      item.projectName = String(t.projectName);
+    }
+    return item;
+  });
   const taskSummaryList = selectedTasks.map((t) => (t.projectName ? `[${t.projectName}] ${t.title}` : t.title));
   if (shiftPlan?.note?.trim()) {
     taskSummaryList.push(shiftPlan.note.trim());
@@ -85,7 +94,8 @@ export async function initWorkSession(
   };
 
   const createNew = async (): Promise<WorkSessionState> => {
-    const ref = await addDoc(collection(db, "workSessions"), {
+    const docRef = doc(collection(db, "workSessions"));
+    const payload = {
       workerId: worker.uid,
       workerName: fullName,
       workerEmail: worker.email ?? "",
@@ -100,7 +110,16 @@ export async function initWorkSession(
       totalWorkTime: 0,
       date: today,
       createdAt: serverTimestamp(),
-    });
+    };
+
+    try {
+      await Promise.race([
+        setDoc(docRef, payload),
+        new Promise<void>((resolve) => setTimeout(() => resolve(), 6000)),
+      ]);
+    } catch (err) {
+      console.warn("setDoc workSessions warning:", err);
+    }
 
     if (worker.uid) {
       updateDoc(doc(db, "workers", worker.uid), {
@@ -115,7 +134,7 @@ export async function initWorkSession(
     }
 
     return {
-      id: ref.id,
+      id: docRef.id,
       startTime: now,
       segmentStart: now,
       priorMs: 0,
@@ -132,13 +151,17 @@ export async function initWorkSession(
   );
 
   try {
-    const snap = await getDocs(q);
-    if (!snap.empty) {
+    const snap = await Promise.race([
+      getDocs(q),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+    ]);
+    if (snap && !snap.empty) {
       // Resume today's record: bank what was already logged, start a new segment now.
       const existing = snap.docs[0]!;
       const data = existing.data();
       const wasActive = Boolean(data.isActive);
-      const start: Date = data.startTime?.toDate?.() ?? new Date(data.startTime ?? now);
+      const rawStart: Date = data.startTime?.toDate?.() ?? new Date(data.startTime ?? now);
+      const start: Date = isNaN(rawStart.getTime()) ? now : rawStart;
       const priorMs = typeof data.totalWorkTime === "number" ? data.totalWorkTime : 0;
       const updatePayload: Record<string, unknown> = {
         isActive: true,
@@ -152,7 +175,10 @@ export async function initWorkSession(
         updatePayload.currentTaskNote = shiftPlan.note?.trim() || null;
         updatePayload.shiftTasks = selectedTasks;
       }
-      await updateDoc(doc(db, "workSessions", existing.id), updatePayload);
+      await Promise.race([
+        updateDoc(doc(db, "workSessions", existing.id), updatePayload),
+        new Promise<void>((resolve) => setTimeout(() => resolve(), 6000)),
+      ]);
 
       if (worker.uid) {
         const workerPayload: Record<string, unknown> = {
@@ -183,10 +209,13 @@ export async function initWorkSession(
     }
     return await createNew();
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : "";
-    if (msg.includes("index")) return await createNew();
-    console.error("initWorkSession", e);
-    return null;
+    console.warn("initWorkSession query/update fallback to createNew:", e);
+    try {
+      return await createNew();
+    } catch (innerErr) {
+      console.error("initWorkSession fatal:", innerErr);
+      return null;
+    }
   }
 }
 
@@ -202,14 +231,17 @@ export async function syncWorkSession(db: Firestore, session: WorkSessionState):
 export async function endWorkSession(db: Firestore, session: WorkSessionState): Promise<WorkSessionState> {
   const logoutTime = new Date();
   const totalWorkTime = workedMs(session, logoutTime.getTime());
-  await updateDoc(doc(db, "workSessions", session.id), {
-    logoutTime,
-    endTime: logoutTime,
-    isActive: false,
-    presenceStatus: "offline",
-    totalWorkTime,
-    completedAt: serverTimestamp(),
-  });
+  await Promise.race([
+    updateDoc(doc(db, "workSessions", session.id), {
+      logoutTime,
+      endTime: logoutTime,
+      isActive: false,
+      presenceStatus: "offline",
+      totalWorkTime,
+      completedAt: serverTimestamp(),
+    }),
+    new Promise<void>((resolve) => setTimeout(() => resolve(), 6000)),
+  ]);
   return { ...session, priorMs: totalWorkTime, segmentStart: logoutTime, isActive: false };
 }
 

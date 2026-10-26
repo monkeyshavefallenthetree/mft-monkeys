@@ -1,6 +1,6 @@
 import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
 import { getAuth, type Auth } from "firebase/auth";
-import { getFirestore, type Firestore } from "firebase/firestore";
+import { getFirestore, initializeFirestore, type Firestore } from "firebase/firestore";
 import { getAnalytics, type Analytics, isSupported } from "firebase/analytics";
 
 export type FirebaseInit = {
@@ -46,10 +46,21 @@ export function getFirebase(): FirebaseInit | null {
   }
 
   const app = getApps().length === 0 ? initializeApp(config) : getApps()[0]!;
+  const db = (() => {
+    try {
+      return initializeFirestore(app, {
+        ignoreUndefinedProperties: true,
+        experimentalAutoDetectLongPolling: true,
+      });
+    } catch {
+      return getFirestore(app);
+    }
+  })();
+
   cached = {
     app,
     auth: getAuth(app),
-    db: getFirestore(app),
+    db,
   };
 
   if (typeof window !== "undefined") {

@@ -583,11 +583,16 @@ export default function DashboardApp() {
 
     const chosenTasks = myActiveTasks
       .filter((t) => selectedShiftTaskIds.includes(t.id))
-      .map((t) => ({
-        id: t.id,
-        title: t.title || "Untitled Task",
-        projectName: t.projectName,
-      }));
+      .map((t) => {
+        const item: { id: string; title: string; projectName?: string } = {
+          id: String(t.id || ""),
+          title: String(t.title || "Untitled Task"),
+        };
+        if (t.projectName) {
+          item.projectName = String(t.projectName);
+        }
+        return item;
+      });
 
     if (myActiveTasks.length > 0 && chosenTasks.length === 0 && !shiftTaskNote.trim()) {
       toast.warning("يرجى اختيار المهام التي ستعمل عليها أولاً", {
@@ -651,14 +656,26 @@ export default function DashboardApp() {
           navigator.geolocation.getCurrentPosition(
             (pos) => resolve(pos),
             (err) => {
-              setLastGpsError(
-                err.code === 1
-                  ? "يرجى السماح بصلاحية الموقع الجغرافي (Location Permission)، أو إذا كنت على جهاز كمبيوتر داخل الشركة استخدم «كود حضور المكتب» بالأسفل."
-                  : "تعذر تحديد موقعك عبر الـ GPS — إذا كنت داخل الشركة استخدم «كود حضور المكتب» بالأسفل، أو أرسل طلب مأمورية خارجية.",
+              if (err.code === 1) {
+                setLastGpsError(
+                  "يرجى السماح بصلاحية الموقع الجغرافي (Location Permission)، أو إذا كنت داخل الشركة استخدم «كود حضور المكتب» بالأسفل.",
+                );
+                resolve(null);
+                return;
+              }
+              // Indoor Wi-Fi fallback when satellite high-accuracy times out inside the building
+              navigator.geolocation.getCurrentPosition(
+                (pos2) => resolve(pos2),
+                () => {
+                  setLastGpsError(
+                    "تعذر تحديد موقعك عبر الـ GPS داخل المبنى — إذا كنت داخل الشركة استخدم «كود حضور المكتب» بالأسفل، أو أرسل طلب مأمورية خارجية.",
+                  );
+                  resolve(null);
+                },
+                { enableHighAccuracy: false, timeout: 6000, maximumAge: 60000 },
               );
-              resolve(null);
             },
-            { enableHighAccuracy: true, timeout: 10000, maximumAge: 10000 },
+            { enableHighAccuracy: true, timeout: 6000, maximumAge: 15000 },
           );
         });
 
@@ -718,9 +735,17 @@ export default function DashboardApp() {
       }
 
       const nowTs = Date.now();
-      sessionStorage.setItem("workerShiftMode", "clocked-in");
-      sessionStorage.setItem("workerLoginTime", ws.startTime.toISOString());
-      sessionStorage.setItem("workerLastCheckInTime", String(nowTs));
+      try {
+        sessionStorage.setItem("workerShiftMode", "clocked-in");
+        const safeStartIso =
+          ws.startTime instanceof Date && !isNaN(ws.startTime.getTime())
+            ? ws.startTime.toISOString()
+            : new Date().toISOString();
+        sessionStorage.setItem("workerLoginTime", safeStartIso);
+        sessionStorage.setItem("workerLastCheckInTime", String(nowTs));
+      } catch {
+        /* ignore sessionStorage quota/privacy errors on mobile */
+      }
       lastCheckInTimeRef.current = nowTs;
       checkInNotifiedRef.current = false;
       setCheckInModalOpen(false);

@@ -199,8 +199,18 @@ export function authorizeTrustedOfficePc(
  * Fetches the client's current Public IP address.
  */
 export async function fetchClientPublicIp(): Promise<string | null> {
+  const fetchWithTimeout = async (url: string, ms = 3000): Promise<Response> => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ms);
+    try {
+      return await fetch(url, { cache: "no-store", signal: ctrl.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   try {
-    const res = await fetch("/api/client-ip", { cache: "no-store" });
+    const res = await fetchWithTimeout("/api/client-ip", 2500);
     if (res.ok) {
       const data = (await res.json()) as { ip?: string | null };
       if (data?.ip) return data.ip.trim();
@@ -209,7 +219,7 @@ export async function fetchClientPublicIp(): Promise<string | null> {
     /* fallback below */
   }
   try {
-    const res = await fetch("https://api.ipify.org?format=json", { cache: "no-store" });
+    const res = await fetchWithTimeout("https://api.ipify.org?format=json", 2500);
     if (res.ok) {
       const data = (await res.json()) as { ip?: string };
       if (data?.ip) return data.ip.trim();
