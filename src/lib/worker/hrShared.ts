@@ -74,6 +74,41 @@ export const DEFAULT_HR_SETTINGS: HrSettings = {
 };
 
 const TRUSTED_OFFICE_PC_STORAGE_KEY = "mft_trusted_office_pc_v1";
+const inMemoryVerifiedPins = new Map<string, number>();
+
+export interface ClientConnectionInfo {
+  /** True if browser explicitly reports cellular / mobile data (4G/5G/3G) instead of Wi-Fi/Ethernet. */
+  isCellular: boolean;
+  /** Raw connection type reported by Network Information API ("wifi", "cellular", "ethernet", "unknown"). */
+  connectionType: string;
+  /** True if User-Agent is a mobile/tablet device. */
+  isMobileDevice: boolean;
+}
+
+/**
+ * Detects whether the client is on cellular data (Mobile Data) vs Wi-Fi/Ethernet,
+ * and whether the device is a mobile phone/tablet.
+ */
+export function detectConnectionInfo(): ClientConnectionInfo {
+  if (typeof window === "undefined" || typeof navigator === "undefined") {
+    return { isCellular: false, connectionType: "unknown", isMobileDevice: false };
+  }
+  const nav = navigator as Navigator & {
+    connection?: { type?: string; effectiveType?: string };
+    mozConnection?: { type?: string; effectiveType?: string };
+    webkitConnection?: { type?: string; effectiveType?: string };
+  };
+  const conn = nav.connection || nav.mozConnection || nav.webkitConnection;
+  const rawType = String(conn?.type || "unknown").toLowerCase();
+  const isCellular = rawType === "cellular" || rawType === "wimax" || rawType === "bluetooth";
+  const ua = String(navigator.userAgent || "");
+  const isMobileDevice = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+  return {
+    isCellular,
+    connectionType: rawType,
+    isMobileDevice,
+  };
+}
 
 function normalizeDigits(str: string): string {
   return str
@@ -130,29 +165,79 @@ export function verifyOfficePinInput(
   return false;
 }
 
+/**
+ * Marks that the worker just verified the Office PIN for the immediate clock-in attempt
+ * (valid for 2 minutes and consumed once the shift starts, so switching to Mobile Data later cannot reuse it).
+ */
 export function markOfficePinVerifiedForToday(uid: string, dateYmd: string = getLocalYmdForPin()): void {
+  const key = `mft_office_pin_ok_${uid}_${dateYmd}`;
+  const now = Date.now();
+  inMemoryVerifiedPins.set(key, now);
   if (typeof window === "undefined") return;
   try {
-    localStorage.setItem(`mft_office_pin_ok_${uid}_${dateYmd}`, "1");
+    sessionStorage.setItem(key, String(now));
+  } catch {
+    /* ignore */
+  }
+  try {
+    localStorage.removeItem(key);
   } catch {
     /* ignore */
   }
 }
 
 export function hasVerifiedOfficePinToday(uid: string, dateYmd: string = getLocalYmdForPin()): boolean {
-  if (typeof window === "undefined" || !uid) return false;
+  if (!uid) return false;
+  const conn = detectConnectionInfo();
+  if (conn.isCellular) return false;
+  const key = `mft_office_pin_ok_${uid}_${dateYmd}`;
+  const now = Date.now();
+  const MAX_PIN_TOKEN_AGE_MS = 2 * 60 * 1000; // 2 minutes
+  const memTs = inMemoryVerifiedPins.get(key);
+  if (memTs && now - memTs <= MAX_PIN_TOKEN_AGE_MS) {
+    return true;
+  }
+  if (typeof window === "undefined") return false;
   try {
-    return localStorage.getItem(`mft_office_pin_ok_${uid}_${dateYmd}`) === "1";
+    const raw = sessionStorage.getItem(key);
+    if (raw) {
+      const ts = parseInt(raw, 10);
+      if (Number.isFinite(ts) && now - ts <= MAX_PIN_TOKEN_AGE_MS) {
+        return true;
+      }
+    }
   } catch {
-    return false;
+    /* ignore */
+  }
+  return false;
+}
+
+export function consumeOfficePinVerification(uid: string, dateYmd: string = getLocalYmdForPin()): void {
+  const key = `mft_office_pin_ok_${uid}_${dateYmd}`;
+  inMemoryVerifiedPins.delete(key);
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* ignore */
   }
 }
 
 /**
  * Checks if this browser is authorized as a permanent Trusted Office PC.
+ * Never trusts mobile devices or cellular data connections.
  */
 export function isTrustedOfficePc(settings?: Partial<HrSettings>): { trusted: boolean; label?: string } {
   if (typeof window === "undefined") return { trusted: false };
+  const conn = detectConnectionInfo();
+  if (conn.isCellular || conn.isMobileDevice) {
+    return { trusted: false };
+  }
   try {
     const raw = localStorage.getItem(TRUSTED_OFFICE_PC_STORAGE_KEY);
     if (!raw) return { trusted: false };

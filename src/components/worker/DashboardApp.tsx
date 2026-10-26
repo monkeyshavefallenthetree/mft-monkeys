@@ -31,7 +31,8 @@ import {
 } from "@/lib/worker/format";
 import {
   DEFAULT_HR_SETTINGS,
-  evaluateWorkerGeofence,
+  consumeOfficePinVerification,
+  detectConnectionInfo,
   evaluateWorkerLateness,
   fetchClientPublicIp,
   formatTimeAmPm,
@@ -312,6 +313,7 @@ export default function DashboardApp() {
   const [exceptionType, setExceptionType] = useState("late");
   const [advanceAmount, setAdvanceAmount] = useState<number>(500);
   const [hrSettings, setHrSettings] = useState<HrSettings>(DEFAULT_HR_SETTINGS);
+  const hrSettingsLoadedRef = useRef(false);
   const [holidays, setHolidays] = useState<HolidayItem[]>([]);
   const [adjustments, setAdjustments] = useState<PayrollAdjustment[]>([]);
   const [exceptionSubmitting, setExceptionSubmitting] = useState(false);
@@ -523,8 +525,10 @@ export default function DashboardApp() {
       const storedOt = parseInt(sessionStorage.getItem("workerOvertimeMinutes") || "0", 10) || 0;
       setOvertimeMinutes(storedOt);
 
-      if (storedMode === "clocked-in") {
-        // Page refresh while on shift: resume today's record.
+      const connInfo = detectConnectionInfo();
+      const verifiedDate = sessionStorage.getItem("mft_office_verified_date");
+      if (storedMode === "clocked-in" && !connInfo.isCellular && verifiedDate === localYmd()) {
+        // Page refresh while on shift (and verified on Wi-Fi / Office): resume today's record.
         setShiftMode("clocked-in");
         const ws = await initWorkSession(fb.db, {
           uid: userId,
@@ -538,6 +542,14 @@ export default function DashboardApp() {
         lastCheckInTimeRef.current = initialCheckInTs;
         sessionStorage.setItem("workerLastCheckInTime", String(initialCheckInTs));
       } else {
+        if (storedMode === "clocked-in") {
+          try {
+            sessionStorage.removeItem("workerShiftMode");
+            sessionStorage.removeItem("mft_office_verified_date");
+          } catch {
+            /* ignore */
+          }
+        }
         // Open task selection & shift start modal immediately upon entering the system
         setShiftMode(storedMode === "view-only" ? "view-only" : null);
         setSession(null);
@@ -577,206 +589,214 @@ export default function DashboardApp() {
     );
   }, []);
 
-  const startActiveShift = useCallback(async () => {
-    const fb = getFirebase();
-    if (!fb || !uid || !profile || shiftBusy) return;
+  const startActiveShift = useCallback(
+    async (opts?: { pinJustVerified?: boolean; pcJustAuthorized?: boolean }) => {
+      const fb = getFirebase();
+      if (!fb || !uid || !profile || shiftBusy) return;
 
-    const chosenTasks = myActiveTasks
-      .filter((t) => selectedShiftTaskIds.includes(t.id))
-      .map((t) => {
-        const item: { id: string; title: string; projectName?: string } = {
-          id: String(t.id || ""),
-          title: String(t.title || "Untitled Task"),
-        };
-        if (t.projectName) {
-          item.projectName = String(t.projectName);
-        }
-        return item;
-      });
-
-    if (myActiveTasks.length > 0 && chosenTasks.length === 0 && !shiftTaskNote.trim()) {
-      toast.warning("يرجى اختيار المهام التي ستعمل عليها أولاً", {
-        description: "حدد مهمة واحدة على الأقل من قائمتك لبدء الشيفت وإبلاغ الإدارة.",
-      });
-      return;
-    }
-
-    setShiftBusy(true);
-    try {
-      // Check Geofence (Work Locations) if Admin has configured active locations
-      const activeWorkLocs = (hrSettings.workLocations ?? []).filter(
-        (l) => l.active !== false && Number.isFinite(Number(l.lat)) && Number.isFinite(Number(l.lng)),
-      );
-      const geofenceEnforced = hrSettings.enforceGeofence !== false && activeWorkLocs.length > 0;
-      const todayStr = localYmd();
-      const hasApprovedTodayMission = exceptions.some(
-        (x) =>
-          x.type === "external_mission" &&
-          String(x.exceptionDate || "") === todayStr &&
-          x.status === "approved",
-      );
-
-      // Non-GPS Office Verification Channels (for desktop PCs & devices inside the company without GPS):
-      // 1) Worker already verified today's Office PIN
-      const verifiedByOfficePin = hasVerifiedOfficePinToday(uid, todayStr);
-      // 2) This computer browser is authorized as a stationary Trusted Office PC
-      const trustedPc = isTrustedOfficePc(hrSettings);
-      // 3) Device is connected to an approved Company Wi-Fi / Public IP
-      let verifiedByOfficeIp = false;
-      if (
-        geofenceEnforced &&
-        !hasApprovedTodayMission &&
-        !verifiedByOfficePin &&
-        !trustedPc.trusted &&
-        (hrSettings.officeNetworks ?? []).some((n) => n.active !== false && Boolean(n.ip?.trim()))
-      ) {
-        const clientIp = await fetchClientPublicIp();
-        const matchedNet = matchOfficeNetworkIp(clientIp, hrSettings);
-        if (matchedNet) {
-          verifiedByOfficeIp = true;
-        }
-      }
-
-      const bypassedByOfficeAuth =
-        hasApprovedTodayMission || verifiedByOfficePin || trustedPc.trusted || verifiedByOfficeIp;
-
-      if (geofenceEnforced && !bypassedByOfficeAuth) {
-        if (typeof navigator === "undefined" || !navigator.geolocation) {
-          setLastGpsError(
-            "هذا الجهاز لا يدعم الـ GPS — إذا كنت داخل مقر الشركة استخدم «كود حضور المكتب» بالأسفل، أو أرسل طلب مأمورية خارجية.",
-          );
-          setLastGeofenceResult(null);
-          setShowShiftChoiceModal(false);
-          setOutsideLocationModalOpen(true);
-          setShiftBusy(false);
-          return;
-        }
-
-        const gpsPos = await new Promise<GeolocationPosition | null>((resolve) => {
-          navigator.geolocation.getCurrentPosition(
-            (pos) => resolve(pos),
-            (err) => {
-              if (err.code === 1) {
-                setLastGpsError(
-                  "يرجى السماح بصلاحية الموقع الجغرافي (Location Permission)، أو إذا كنت داخل الشركة استخدم «كود حضور المكتب» بالأسفل.",
-                );
-                resolve(null);
-                return;
-              }
-              // Indoor Wi-Fi fallback when satellite high-accuracy times out inside the building
-              navigator.geolocation.getCurrentPosition(
-                (pos2) => resolve(pos2),
-                () => {
-                  setLastGpsError(
-                    "تعذر تحديد موقعك عبر الـ GPS داخل المبنى — إذا كنت داخل الشركة استخدم «كود حضور المكتب» بالأسفل، أو أرسل طلب مأمورية خارجية.",
-                  );
-                  resolve(null);
-                },
-                { enableHighAccuracy: false, timeout: 6000, maximumAge: 60000 },
-              );
-            },
-            { enableHighAccuracy: true, timeout: 6000, maximumAge: 15000 },
-          );
+      let chosenTasks = myActiveTasks
+        .filter((t) => selectedShiftTaskIds.includes(t.id))
+        .map((t) => {
+          const item: { id: string; title: string; projectName?: string } = {
+            id: String(t.id || ""),
+            title: String(t.title || "Untitled Task"),
+          };
+          if (t.projectName) {
+            item.projectName = String(t.projectName);
+          }
+          return item;
         });
 
-        if (!gpsPos) {
-          setLastGeofenceResult(null);
-          setShowShiftChoiceModal(false);
-          setOutsideLocationModalOpen(true);
-          setShiftBusy(false);
-          toast.warning("📍 أدخل كود حضور المكتب (إذا كنت داخل الشركة بدون GPS) أو أرسل طلب مأمورية خارجية");
-          return;
-        }
-
-        const coords = { lat: gpsPos.coords.latitude, lng: gpsPos.coords.longitude };
-        setLastWorkerCoords(coords);
-        setLastGpsError(null);
-        const geoCheck = evaluateWorkerGeofence(coords.lat, coords.lng, hrSettings);
-        setLastGeofenceResult(geoCheck);
-
-        if (!geoCheck.inside) {
-          setShowShiftChoiceModal(false);
-          setOutsideLocationModalOpen(true);
-          setShiftBusy(false);
-          toast.warning("📍 إذا كنت على كمبيوتر داخل الشركة أدخل «كود المكتب»، أو أرسل طلب مأمورية خارجية", {
-            description: geoCheck.nearestLocation
-              ? `أقرب موقع عمل (${geoCheck.nearestLocation.name}) يبعد عن موقع الـ GPS الحالي ${geoCheck.distanceMeters} متر.`
-              : undefined,
+      // If starting from inside OutsideLocationMissionModal and no task was checked, auto-select the first active task
+      if (myActiveTasks.length > 0 && chosenTasks.length === 0 && !shiftTaskNote.trim()) {
+        if (outsideLocationModalOpen && myActiveTasks[0]) {
+          const first = myActiveTasks[0];
+          const fallbackItem: { id: string; title: string; projectName?: string } = {
+            id: String(first.id || ""),
+            title: String(first.title || "Untitled Task"),
+          };
+          if (first.projectName) {
+            fallbackItem.projectName = String(first.projectName);
+          }
+          chosenTasks = [fallbackItem];
+          setSelectedShiftTaskIds([first.id]);
+        } else {
+          setShowShiftChoiceModal(true);
+          toast.warning("يرجى اختيار المهام التي ستعمل عليها أولاً", {
+            description: "حدد مهمة واحدة على الأقل من قائمتك لبدء الشيفت وإبلاغ الإدارة.",
           });
           return;
         }
       }
 
-      setOutsideLocationModalOpen(false);
-      const ws = await initWorkSession(
-        fb.db,
-        {
-          uid,
-          firstName: profile.firstName,
-          lastName: profile.lastName,
-          email: profile.email,
-        },
-        {
-          selectedTasks: chosenTasks,
-          note: shiftTaskNote.trim() || undefined,
-          sendNotification: true,
-        },
-      );
-      if (!ws) throw new Error("no session");
-
-      // Mark any selected "assigned" tasks as "in-progress" automatically
-      for (const t of myActiveTasks) {
-        if (selectedShiftTaskIds.includes(t.id) && t.status === "assigned") {
-          updateDoc(doc(fb.db, "tasks", t.id), {
-            status: "in-progress",
-            startedAt: serverTimestamp(),
-          }).catch(() => {});
-        }
-      }
-
-      const nowTs = Date.now();
+      setShiftBusy(true);
       try {
-        sessionStorage.setItem("workerShiftMode", "clocked-in");
-        const safeStartIso =
-          ws.startTime instanceof Date && !isNaN(ws.startTime.getTime())
-            ? ws.startTime.toISOString()
-            : new Date().toISOString();
-        sessionStorage.setItem("workerLoginTime", safeStartIso);
-        sessionStorage.setItem("workerLastCheckInTime", String(nowTs));
-      } catch {
-        /* ignore sessionStorage quota/privacy errors on mobile */
-      }
-      lastCheckInTimeRef.current = nowTs;
-      checkInNotifiedRef.current = false;
-      setCheckInModalOpen(false);
-      setIsWorkerIdle(false);
-      setCheckInSecondsRemaining(CHECKIN_EARLY_WINDOW_SECONDS);
+        // Ensure HR settings are loaded from Firestore so we never evaluate against uninitialized defaults
+        let effectiveHrSettings = hrSettings;
+        if (!hrSettingsLoadedRef.current) {
+          try {
+            const hrSnap = await Promise.race([
+              getDoc(doc(fb.db, "settings", "hr")),
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+            ]);
+            if (hrSnap && hrSnap.exists()) {
+              effectiveHrSettings = { ...DEFAULT_HR_SETTINGS, ...(hrSnap.data() as Partial<HrSettings>) };
+              hrSettingsLoadedRef.current = true;
+              setHrSettings(effectiveHrSettings);
+            }
+          } catch {
+            /* fallback to current hrSettings */
+          }
+        }
 
-      setSession(ws);
-      setShiftMode("clocked-in");
-      setShowShiftChoiceModal(false);
-      shiftWarningGivenRef.current = false;
-      lastSyncRef.current = nowTs;
-      setLastSyncAt(new Date());
-      playTerminalBeep();
-      // Same-day return after an early leave → refund that early-leave permission.
-      if (ws.priorMs > 0) void reverseEarlyLeaveOnReturn(fb.db, uid, localYmd());
-      if (ws.priorMs > 60_000) {
-        toast.success("تم استئناف الشيفت وإبلاغ الإدارة بالمهام ✓", {
-          description: `تم تسجيل ${formatHM(ws.priorMs)} اليوم. التذكير القادم بعد ساعتين.`,
-        });
-      } else {
-        toast.success("تم بدء الشيفت وإرسال المهام المختارة للإدارة ✓", {
-          description: "سيظهر تنبيه تأكيد الحضور الدوري كل ساعتين (مع مهلة ١٠ دقائق قبل نهاية الساعتين).",
-        });
+        // Non-GPS Office & Mission Gate (always enforced unless Admin explicitly turns off enforceGeofence)
+        const officeGateEnforced = effectiveHrSettings.enforceGeofence !== false;
+        const todayStr = localYmd();
+        const connInfo = detectConnectionInfo();
+
+        const hasApprovedTodayMission = exceptions.some(
+          (x) =>
+            x.type === "external_mission" &&
+            String(x.exceptionDate || "") === todayStr &&
+            x.status === "approved",
+        );
+
+        // Non-GPS Office Verification Channels (Zero GPS usage):
+        // Note: Cellular / Mobile Data (4G/5G) is NEVER allowed to pass as inside-office!
+        // 1) Worker verified today's 4-digit Office PIN right now (and is not on cellular data)
+        const verifiedByOfficePin =
+          !connInfo.isCellular &&
+          effectiveHrSettings.officePinEnabled !== false &&
+          (Boolean(opts?.pinJustVerified) || hasVerifiedOfficePinToday(uid, todayStr));
+
+        // 2) Desktop PC browser is permanently authorized as a stationary Trusted Office PC
+        const trustedPc =
+          !connInfo.isCellular &&
+          !connInfo.isMobileDevice &&
+          (Boolean(opts?.pcJustAuthorized) || isTrustedOfficePc(effectiveHrSettings).trusted);
+
+        // 3) Device is connected to an approved Company Wi-Fi / Public IP (and is not on cellular data)
+        let verifiedByOfficeIp = false;
+        if (
+          officeGateEnforced &&
+          !connInfo.isCellular &&
+          !hasApprovedTodayMission &&
+          !verifiedByOfficePin &&
+          !trustedPc &&
+          (effectiveHrSettings.officeNetworks ?? []).some((n) => n.active !== false && Boolean(n.ip?.trim()))
+        ) {
+          const clientIp = await fetchClientPublicIp();
+          const matchedNet = matchOfficeNetworkIp(clientIp, effectiveHrSettings);
+          if (matchedNet) {
+            verifiedByOfficeIp = true;
+          }
+        }
+
+        const passedOfficeGate =
+          hasApprovedTodayMission || verifiedByOfficePin || trustedPc || verifiedByOfficeIp;
+
+        if (officeGateEnforced && !passedOfficeGate) {
+          setLastGeofenceResult(null);
+          setLastGpsError(null);
+          setShowShiftChoiceModal(false);
+          setOutsideLocationModalOpen(true);
+          setShiftBusy(false);
+          if (connInfo.isCellular) {
+            toast.warning("📵 لا يمكن بدء الشيفت وأنت فاتح باقة الموبايل (Mobile Data)!", {
+              description: "أغلق بيانات الهاتف واتصل بـ Wi-Fi الشركة، أو أرسل طلب مأمورية خارجية.",
+            });
+          } else {
+            toast.warning("🏢 يرجى تأكيد تواجدك داخل الشركة (عبر Wi-Fi الشركة أو كود المكتب) أو إرسال طلب مأمورية خارجية");
+          }
+          return;
+        }
+
+        // Consume one-time Office PIN token so switching to Mobile Data later cannot reuse it
+        consumeOfficePinVerification(uid, todayStr);
+        setOutsideLocationModalOpen(false);
+
+        const ws = await initWorkSession(
+          fb.db,
+          {
+            uid,
+            firstName: profile.firstName,
+            lastName: profile.lastName,
+            email: profile.email,
+          },
+          {
+            selectedTasks: chosenTasks,
+            note: shiftTaskNote.trim() || undefined,
+            sendNotification: true,
+          },
+        );
+        if (!ws) throw new Error("no session");
+
+        // Mark any selected "assigned" tasks as "in-progress" automatically
+        for (const t of myActiveTasks) {
+          if (selectedShiftTaskIds.includes(t.id) && t.status === "assigned") {
+            updateDoc(doc(fb.db, "tasks", t.id), {
+              status: "in-progress",
+              startedAt: serverTimestamp(),
+            }).catch(() => {});
+          }
+        }
+
+        const nowTs = Date.now();
+        try {
+          sessionStorage.setItem("workerShiftMode", "clocked-in");
+          sessionStorage.setItem("mft_office_verified_date", todayStr);
+          const safeStartIso =
+            ws.startTime instanceof Date && !isNaN(ws.startTime.getTime())
+              ? ws.startTime.toISOString()
+              : new Date().toISOString();
+          sessionStorage.setItem("workerLoginTime", safeStartIso);
+          sessionStorage.setItem("workerLastCheckInTime", String(nowTs));
+        } catch {
+          /* ignore sessionStorage quota/privacy errors on mobile */
+        }
+        lastCheckInTimeRef.current = nowTs;
+        checkInNotifiedRef.current = false;
+        setCheckInModalOpen(false);
+        setIsWorkerIdle(false);
+        setCheckInSecondsRemaining(CHECKIN_EARLY_WINDOW_SECONDS);
+
+        setSession(ws);
+        setShiftMode("clocked-in");
+        setShowShiftChoiceModal(false);
+        shiftWarningGivenRef.current = false;
+        lastSyncRef.current = nowTs;
+        setLastSyncAt(new Date());
+        playTerminalBeep();
+        // Same-day return after an early leave → refund that early-leave permission.
+        if (ws.priorMs > 0) void reverseEarlyLeaveOnReturn(fb.db, uid, localYmd());
+        if (ws.priorMs > 60_000) {
+          toast.success("تم استئناف الشيفت وإبلاغ الإدارة بالمهام ✓", {
+            description: `تم تسجيل ${formatHM(ws.priorMs)} اليوم. التذكير القادم بعد ساعتين.`,
+          });
+        } else {
+          toast.success("تم بدء الشيفت وإرسال المهام المختارة للإدارة ✓", {
+            description: "سيظهر تنبيه تأكيد الحضور الدوري كل ساعتين (مع مهلة ١٠ دقائق قبل نهاية الساعتين).",
+          });
+        }
+      } catch (e) {
+        console.error("Failed to init work session", e);
+        toast.error("Couldn't clock you in", { description: "Check your connection and try again." });
+      } finally {
+        setShiftBusy(false);
       }
-    } catch (e) {
-      console.error("Failed to init work session", e);
-      toast.error("Couldn't clock you in", { description: "Check your connection and try again." });
-    } finally {
-      setShiftBusy(false);
-    }
-  }, [uid, profile, shiftBusy, myActiveTasks, selectedShiftTaskIds, shiftTaskNote, hrSettings, exceptions]);
+    },
+    [
+      uid,
+      profile,
+      shiftBusy,
+      myActiveTasks,
+      selectedShiftTaskIds,
+      shiftTaskNote,
+      hrSettings,
+      exceptions,
+      outsideLocationModalOpen,
+    ],
+  );
 
   const handleConfirmCheckIn = useCallback(
     async (data: { taskId?: string; taskTitle?: string; note?: string }) => {
@@ -845,7 +865,9 @@ export default function DashboardApp() {
     try {
       let banked = ws;
       if (fb && ws) banked = await endWorkSession(fb.db, ws);
+      if (uid) consumeOfficePinVerification(uid, localYmd());
       sessionStorage.setItem("workerShiftMode", "view-only");
+      sessionStorage.removeItem("mft_office_verified_date");
       sessionStorage.removeItem("workerLoginTime");
       sessionStorage.removeItem("workerLastCheckInTime");
       setSession(banked);
@@ -863,7 +885,7 @@ export default function DashboardApp() {
     } finally {
       setShiftBusy(false);
     }
-  }, [policyEarlyGate]);
+  }, [policyEarlyGate, uid]);
 
   const handleLogout = useCallback(async (opts?: { silent?: boolean; reasonNotice?: string }) => {
     if (loggingOutRef.current) return;
@@ -907,6 +929,8 @@ export default function DashboardApp() {
     if (opts?.reasonNotice) {
       sessionStorage.setItem("shiftEndNotice", opts.reasonNotice);
     }
+    if (uid) consumeOfficePinVerification(uid, localYmd());
+    sessionStorage.removeItem("mft_office_verified_date");
     sessionStorage.removeItem("workerLoginTime");
     sessionStorage.removeItem("workerShiftMode");
     sessionStorage.removeItem("workerOvertimeMinutes");
@@ -1476,7 +1500,12 @@ export default function DashboardApp() {
   useEffect(() => {
     const fb = getFirebase();
     if (!fb) return;
-    const unsubSettings = registerUnsub(subscribeHrSettings(fb.db, setHrSettings));
+    const unsubSettings = registerUnsub(
+      subscribeHrSettings(fb.db, (s) => {
+        hrSettingsLoadedRef.current = true;
+        setHrSettings(s);
+      }),
+    );
     const unsubHolidays = registerUnsub(subscribeHolidays(fb.db, setHolidays));
     return () => {
       unsubSettings();
@@ -4718,7 +4747,7 @@ export default function DashboardApp() {
           (x) => x.type === "external_mission" && String(x.exceptionDate || "") === todayYmd,
         )}
         busy={shiftBusy}
-        onRetryGpsAndStartShift={() => void startActiveShift()}
+        onRetryGpsAndStartShift={(opts) => void startActiveShift(opts)}
         onClose={() => setOutsideLocationModalOpen(false)}
       />
 

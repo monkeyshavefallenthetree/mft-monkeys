@@ -129,15 +129,23 @@ export default function LoginForm() {
       }
 
       // Reset any previous session storage state so user can choose their shift mode
-      sessionStorage.removeItem("workerLoginTime");
-      sessionStorage.removeItem("workerShiftMode");
-      sessionStorage.removeItem("workerOvertimeMinutes");
+      try {
+        sessionStorage.removeItem("workerLoginTime");
+        sessionStorage.removeItem("workerShiftMode");
+        sessionStorage.removeItem("workerOvertimeMinutes");
+        sessionStorage.removeItem("mft_office_verified_date");
+      } catch {
+        /* ignore sessionStorage errors */
+      }
 
-      await updateDoc(wref, {
-        lastLogin: serverTimestamp(),
-        currentLoginTime: serverTimestamp(),
-        isOnline: true,
-      });
+      await Promise.race([
+        updateDoc(wref, {
+          lastLogin: serverTimestamp(),
+          currentLoginTime: serverTimestamp(),
+          isOnline: true,
+        }).catch(() => {}),
+        new Promise<void>((resolve) => setTimeout(() => resolve(), 2500)),
+      ]);
 
       setSuccess("Welcome back! Opening your dashboard…");
       router.push("/dashboard");

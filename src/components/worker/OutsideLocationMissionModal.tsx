@@ -6,9 +6,11 @@ import { compressImage, type CompressedImage } from "@/lib/worker/imageCompress"
 import { submitException, type ExceptionRow } from "@/lib/worker/exceptions";
 import {
   authorizeTrustedOfficePc,
+  detectConnectionInfo,
   fetchClientPublicIp,
   isTrustedOfficePc,
   markOfficePinVerifiedForToday,
+  matchOfficeNetworkIp,
   verifyOfficePinInput,
   type GeofenceCheckResult,
   type HrSettings,
@@ -28,7 +30,7 @@ interface Props {
   workerCoords: { lat: number; lng: number } | null;
   todayMissionRequests: ExceptionRow[];
   busy?: boolean;
-  onRetryGpsAndStartShift: () => void;
+  onRetryGpsAndStartShift: (opts?: { pinJustVerified?: boolean; pcJustAuthorized?: boolean }) => void;
   onClose: () => void;
 }
 
@@ -48,9 +50,6 @@ export default function OutsideLocationMissionModal({
   workerName,
   workerEmail,
   hrSettings,
-  geofenceResult,
-  gpsError,
-  workerCoords,
   todayMissionRequests,
   busy = false,
   onRetryGpsAndStartShift,
@@ -64,6 +63,8 @@ export default function OutsideLocationMissionModal({
   const [pcSetupCode, setPcSetupCode] = useState("");
   const [pcLabel, setPcLabel] = useState("");
   const [detectedIp, setDetectedIp] = useState<string | null>(null);
+  const [checkingIp, setCheckingIp] = useState(false);
+  const [connInfo, setConnInfo] = useState(() => detectConnectionInfo());
 
   // External mission state
   const [missionHours, setMissionHours] = useState<number>(4);
@@ -75,9 +76,16 @@ export default function OutsideLocationMissionModal({
   useEffect(() => {
     if (!open) return;
     let mounted = true;
-    fetchClientPublicIp().then((ip) => {
-      if (mounted && ip) setDetectedIp(ip);
-    });
+    const info = detectConnectionInfo();
+    setConnInfo(info);
+    setCheckingIp(true);
+    fetchClientPublicIp()
+      .then((ip) => {
+        if (mounted && ip) setDetectedIp(ip);
+      })
+      .finally(() => {
+        if (mounted) setCheckingIp(false);
+      });
     return () => {
       mounted = false;
     };
@@ -89,26 +97,57 @@ export default function OutsideLocationMissionModal({
   const approvedMission = todayMissionRequests.find((r) => r.status === "approved");
   const rejectedMission = todayMissionRequests.find((r) => r.status === "rejected");
   const trustedPcStatus = isTrustedOfficePc(hrSettings);
+  const matchedOfficeNet = !connInfo.isCellular ? matchOfficeNetworkIp(detectedIp, hrSettings) : null;
+
+  const handleRecheckNetwork = async () => {
+    const freshConn = detectConnectionInfo();
+    setConnInfo(freshConn);
+    if (freshConn.isCellular) {
+      toast.error("📵 أنت ما زلت متصلاً بباقة الموبايل (Mobile Data)!", {
+        description: "أغلق بيانات الهاتف واتصل بـ Wi-Fi الشركة أولاً، أو أرسل طلب مأمورية خارجية.",
+      });
+      return;
+    }
+    setCheckingIp(true);
+    const ip = await fetchClientPublicIp();
+    setDetectedIp(ip);
+    setCheckingIp(false);
+    onRetryGpsAndStartShift();
+  };
 
   const handleVerifyOfficePin = (e: React.FormEvent) => {
     e.preventDefault();
+    const freshConn = detectConnectionInfo();
+    setConnInfo(freshConn);
+    if (freshConn.isCellular) {
+      toast.error("📵 لا يمكن استخدام كود حضور المكتب وأنت فاتح باقة الموبايل (Mobile Data)!", {
+        description: "يرجى إغلاق الداتا والاتصال بـ Wi-Fi الشركة أولاً، أو إرسال طلب مأمورية خارجية.",
+      });
+      return;
+    }
     const today = localYmd();
     if (!officePin.trim()) {
       toast.warning("يرجى إدخال كود حضور المكتب اليومي (اطلبه من الأدمن أو الـ HR).");
       return;
     }
     if (!verifyOfficePinInput(officePin, hrSettings, today)) {
-      toast.error("كود حضور المكتب غير صحيح — تأكد من الكود الظاهر في لوحة الـ HR لليوم.");
+      toast.error("كود حضور المكتب غير صحيح — تأكد من الكود المكون من 4 أرقام الظاهر في لوحة الـ HR لليوم.");
       return;
     }
     markOfficePinVerifiedForToday(uid, today);
     setOfficePin("");
     toast.success("🏢 تم التحقق من تواجدك داخل الشركة بكود المكتب ✓ — جاري بدء الشيفت...");
-    onRetryGpsAndStartShift();
+    onRetryGpsAndStartShift({ pinJustVerified: true });
   };
 
   const handleAuthorizeOfficePc = (e: React.FormEvent) => {
     e.preventDefault();
+    const freshConn = detectConnectionInfo();
+    setConnInfo(freshConn);
+    if (freshConn.isCellular || freshConn.isMobileDevice) {
+      toast.error("خيار الكمبيوتر المكتبي الثابت مخصص لأجهزة الكمبيوتر داخل الشركة فقط.");
+      return;
+    }
     if (!pcSetupCode.trim()) {
       toast.warning("يرجى إدخال كود اعتماد أجهزة الشركة الخاص بالأدمن.");
       return;
@@ -121,7 +160,7 @@ export default function OutsideLocationMissionModal({
     setPcSetupCode("");
     setShowPcSetup(false);
     toast.success("💻 تم اعتماد هذا الكمبيوتر كجهاز مكتبي ثابت داخل الشركة ✓ — جاري بدء الشيفت...");
-    onRetryGpsAndStartShift();
+    onRetryGpsAndStartShift({ pcJustAuthorized: true });
   };
 
   const handlePickImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -158,8 +197,6 @@ export default function OutsideLocationMissionModal({
     setSubmitting(true);
     try {
       const today = localYmd();
-      const nearestName = geofenceResult?.nearestLocation?.name ?? null;
-      const dist = geofenceResult?.distanceMeters ?? null;
 
       await submitException(db, {
         workerId: uid,
@@ -170,10 +207,10 @@ export default function OutsideLocationMissionModal({
         missionHours,
         screenshotUrl: screenshot.dataUrl,
         supportingEvidence: screenshot.dataUrl,
-        workerLat: workerCoords?.lat ?? null,
-        workerLng: workerCoords?.lng ?? null,
-        nearestLocationName: nearestName,
-        distanceMeters: dist,
+        workerLat: null,
+        workerLng: null,
+        nearestLocationName: null,
+        distanceMeters: null,
         exceptionDate: today,
         reason: `[مأمورية خارجية — ${missionHours} ساعة]: ${reason.trim()}`,
       });
@@ -205,11 +242,11 @@ export default function OutsideLocationMissionModal({
         <div className="flex items-start justify-between gap-3 pb-3 border-b border-zinc-200 dark:border-zinc-800">
           <div className="flex items-center gap-2.5">
             <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-600 text-lg text-white shadow-md">
-              📍
+              🏢
             </span>
             <div>
               <span className="inline-block rounded-full bg-red-100 px-2.5 py-0.5 text-[10px] font-extrabold text-red-800 dark:bg-red-950/70 dark:text-red-300">
-                التحقق من مكان العمل · Office &amp; Mission Gate
+                بوابة التحقق من التواجد (بدون GPS) · Office &amp; Mission Gate
               </span>
               <h3 className="mt-0.5 text-base sm:text-lg font-extrabold text-zinc-900 dark:text-white">
                 هل أنت داخل مقر الشركة أم في مأمورية خارجية؟
@@ -225,34 +262,27 @@ export default function OutsideLocationMissionModal({
           </button>
         </div>
 
-        {/* Location Distance / GPS Diagnostic Box */}
-        <div className="mt-3.5 rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-800 dark:border-zinc-800 dark:bg-zinc-800/50 dark:text-zinc-200 space-y-1.5">
-          {gpsError ? (
-            <p className="font-bold text-amber-800 dark:text-amber-300">
-              💻 جهازك لا يحتوي على GPS أو لم يتم تحديد الموقع تلقائياً — يمكنك الدخول فوراً بـ «كود حضور المكتب» بالأسفل إذا كنت داخل الشركة.
+        {/* Network / Cellular Status Diagnostic Box (No GPS) */}
+        {connInfo.isCellular ? (
+          <div className="mt-3.5 rounded-xl border-2 border-red-500 bg-red-50 p-3 text-xs text-red-900 dark:border-red-700 dark:bg-red-950/50 dark:text-red-200 space-y-1">
+            <p className="font-extrabold flex items-center gap-1.5">
+              <span>📵</span>
+              <span>أنت فاتح باقة الموبايل (Mobile Data) ولست متصلاً بـ Wi-Fi الشركة!</span>
             </p>
-          ) : geofenceResult?.nearestLocation ? (
-            <div className="space-y-0.5">
-              <p className="font-bold">
-                🏢 أقرب موقع عمل معتمد: <span className="underline">{geofenceResult.nearestLocation.name}</span>
-              </p>
-              <p>
-                📏 المسافة المحسوبة عبر الـ GPS:{" "}
-                <strong className="font-mono text-red-600 dark:text-red-400">
-                  {geofenceResult.distanceMeters >= 1000
-                    ? `${(geofenceResult.distanceMeters / 1000).toFixed(2)} كم`
-                    : `${geofenceResult.distanceMeters} متر`}
-                </strong>{" "}
-                (النطاق المسموح: {geofenceResult.nearestLocation.radiusMeters || 200} متر)
-              </p>
-              <p className="text-[11px] text-zinc-500">
-                ملاحظة: أجهزة الكمبيوتر واللابتوب بدون GPS قد تعطي موقعاً تقريبياً غير دقيق — استخدم تبويب «أنا داخل الشركة» بالأسفل.
-              </p>
-            </div>
-          ) : (
-            <p className="font-bold">يرجى تأكيد تواجدك داخل مقر الشركة أو إرسال طلب مأمورية خارجية.</p>
-          )}
-        </div>
+            <p className="text-[11px] leading-relaxed">
+              لا يسمح النظام ببدء الشيفت تلقائياً على بيانات الهاتف (Mobile Data). إذا كنت داخل مقر الشركة، يرجى إغلاق الداتا والاتصال بـ <strong>Wi-Fi الشركة</strong> أولاً، وإذا كنت خارج الشركة انتقل لتبويب <strong>«أنا في مأمورية خارجية»</strong>.
+            </p>
+          </div>
+        ) : (
+          <div className="mt-3.5 rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-800 dark:border-zinc-800 dark:bg-zinc-800/50 dark:text-zinc-200 space-y-1">
+            <p className="font-bold">
+              🔐 يعمل نظام الحضور بدون GPS لحماية خصوصيتك ودعم جميع الأجهزة:
+            </p>
+            <p className="text-[11px] text-zinc-600 dark:text-zinc-300">
+              إذا كنت داخل مقر الشركة، اتصل بـ <strong>Wi-Fi الشركة</strong> أو أدخل <strong>كود حضور المكتب اليومي (4 أرقام)</strong>. وإذا كنت خارج المقر، أرسل طلب مأمورية خارجية للأدمن.
+            </p>
+          </div>
+        )}
 
         {/* Mode Switcher Tabs */}
         <div className="mt-4 grid grid-cols-2 gap-2 rounded-xl bg-zinc-100 p-1.5 dark:bg-zinc-800">
@@ -266,7 +296,7 @@ export default function OutsideLocationMissionModal({
             }`}
           >
             <span>🏢</span>
-            <span>أنا داخل الشركة (بدون GPS)</span>
+            <span>أنا داخل مقر الشركة</span>
           </button>
           <button
             type="button"
@@ -285,7 +315,46 @@ export default function OutsideLocationMissionModal({
         {/* ══════════════════ TAB 1: INSIDE COMPANY (NO GPS) ══════════════════ */}
         {activeTab === "inside_office" && (
           <div className="mt-4 space-y-4">
-            {/* Option 1: Daily Office PIN */}
+            {/* Option 1: Office Wi-Fi / IP Auto-Check */}
+            <div className="rounded-xl border-2 border-sky-500 bg-sky-50/60 p-3.5 dark:border-sky-800 dark:bg-sky-950/30 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="space-y-1">
+                <div className="font-extrabold text-zinc-900 dark:text-white flex items-center gap-1.5">
+                  <span>🌐</span>
+                  <span>١. التحقق عبر شبكة Wi-Fi الشركة</span>
+                </div>
+                {detectedIp ? (
+                  <div className="text-[11px] text-zinc-600 dark:text-zinc-300 flex flex-wrap items-center gap-1.5">
+                    <span>عنوان شبكتك الحالي (IP):</span>
+                    <code className="rounded bg-white px-1.5 py-0.5 font-mono font-bold text-zinc-900 border border-zinc-300 dark:bg-zinc-800 dark:text-zinc-200 dark:border-zinc-700" dir="ltr">
+                      {detectedIp}
+                    </code>
+                    {matchedOfficeNet ? (
+                      <span className="rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                        ✓ مطابق لشبكة الشركة ({matchedOfficeNet.name})
+                      </span>
+                    ) : (
+                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
+                        غير مسجل كـ Wi-Fi شركة
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-zinc-500">
+                    تأكد من إغلاق باقة الموبايل والاتصال بـ Wi-Fi الشركة ثم اضغط فحص الشبكة.
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleRecheckNetwork()}
+                disabled={busy || checkingIp}
+                className="rounded-xl bg-sky-600 px-4 py-2.5 text-xs font-extrabold text-white shadow-md hover:bg-sky-500 disabled:opacity-50 cursor-pointer shrink-0"
+              >
+                {busy || checkingIp ? "⏳ جاري الفحص..." : "🔄 فحص اتصال Wi-Fi الشركة الآن"}
+              </button>
+            </div>
+
+            {/* Option 2: Daily Office PIN */}
             {hrSettings.officePinEnabled !== false && (
               <form
                 onSubmit={handleVerifyOfficePin}
@@ -294,13 +363,13 @@ export default function OutsideLocationMissionModal({
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <span className="inline-block rounded bg-emerald-600 px-2 py-0.5 text-[10px] font-bold text-white">
-                      الطريقة الأسرع للأجهزة بدون GPS
+                      سريع لجميع الأجهزة داخل المقر
                     </span>
                     <h4 className="mt-1 text-sm font-extrabold text-zinc-900 dark:text-white">
-                      🔑 الدخول بكود حضور المكتب اليومي (Office PIN)
+                      🔑 ٢. الدخول بكود حضور المكتب اليومي (Office PIN)
                     </h4>
                     <p className="text-[11px] text-zinc-600 dark:text-zinc-300 mt-0.5">
-                      اكتب الكود المكون من 4 أرقام الظاهر لدى الـ HR أو الأدمن لبدء الشيفت فوراً من جهازك داخل الشركة:
+                      اكتب الكود المكون من 4 أرقام الظاهر في لوحة الـ HR أو الأدمن لبدء الشيفت فوراً من داخل الشركة:
                     </p>
                   </div>
                 </div>
@@ -312,7 +381,7 @@ export default function OutsideLocationMissionModal({
                     dir="ltr"
                     value={officePin}
                     onChange={(e) => setOfficePin(e.target.value)}
-                    placeholder="أدخل كود المكتب (مثال: 4829)"
+                    placeholder="أدخل كود المكتب (4 أرقام)"
                     className="flex-1 rounded-xl border-2 border-emerald-600 bg-white px-3.5 py-2.5 text-center font-mono text-base font-black tracking-widest text-zinc-900 placeholder:text-xs placeholder:font-sans placeholder:tracking-normal focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:bg-zinc-900 dark:text-white"
                     autoFocus
                   />
@@ -327,82 +396,59 @@ export default function OutsideLocationMissionModal({
               </form>
             )}
 
-            {/* Option 2: Trusted Office PC Setup (One-Time per PC) */}
-            <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3.5 dark:border-zinc-800 dark:bg-zinc-800/40 space-y-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <h5 className="text-xs font-extrabold text-zinc-900 dark:text-white flex items-center gap-1.5">
-                    <span>💻</span>
-                    <span>هل هذا كمبيوتر مكتبي ثابت داخل مقر الشركة؟</span>
-                  </h5>
-                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                    {trustedPcStatus.trusted
-                      ? `هذا الجهاز معتمد بالفعل (${trustedPcStatus.label}) — اضغط إعادة الفحص بالأسفل لبدء الشيفت.`
-                      : "يمكن للأدمن تفعيل هذا الكمبيوتر مرة واحدة فقط ليفتح الشيفت دائماً بدون طلب GPS أو كود يومي."}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowPcSetup((v) => !v)}
-                  className="rounded-lg border border-zinc-300 bg-white px-2.5 py-1.5 text-[11px] font-bold text-zinc-800 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 cursor-pointer shrink-0"
-                >
-                  {showPcSetup ? "إخفاء" : "⚙️ اعتماد هذا الكمبيوتر"}
-                </button>
-              </div>
-
-              {showPcSetup && (
-                <form onSubmit={handleAuthorizeOfficePc} className="pt-2 border-t border-zinc-200 dark:border-zinc-700 space-y-2.5">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <input
-                      type="text"
-                      value={pcLabel}
-                      onChange={(e) => setPcLabel(e.target.value)}
-                      placeholder="اسم الجهاز (مثال: كمبيوتر التصميم 1)"
-                      className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-white"
-                    />
-                    <input
-                      type="password"
-                      dir="ltr"
-                      value={pcSetupCode}
-                      onChange={(e) => setPcSetupCode(e.target.value)}
-                      placeholder="كود اعتماد أجهزة المكتب (من الأدمن)"
-                      className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-mono text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-white"
-                    />
+            {/* Option 3: Trusted Office PC Setup (Desktop Only) */}
+            {!connInfo.isMobileDevice && !connInfo.isCellular && (
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3.5 dark:border-zinc-800 dark:bg-zinc-800/40 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h5 className="text-xs font-extrabold text-zinc-900 dark:text-white flex items-center gap-1.5">
+                      <span>💻</span>
+                      <span>٣. هل هذا كمبيوتر مكتبي ثابت داخل مقر الشركة؟</span>
+                    </h5>
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                      {trustedPcStatus.trusted
+                        ? `هذا الجهاز معتمد بالفعل (${trustedPcStatus.label}).`
+                        : "يمكن للأدمن تفعيل هذا الكمبيوتر مرة واحدة فقط ليفتح الشيفت دائماً بدون طلب كود يومي."}
+                    </p>
                   </div>
                   <button
-                    type="submit"
-                    className="w-full rounded-lg bg-zinc-900 py-2 text-xs font-extrabold text-white hover:bg-zinc-800 dark:bg-white dark:text-zinc-900 cursor-pointer"
+                    type="button"
+                    onClick={() => setShowPcSetup((v) => !v)}
+                    className="rounded-lg border border-zinc-300 bg-white px-2.5 py-1.5 text-[11px] font-bold text-zinc-800 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 cursor-pointer shrink-0"
                   >
-                    🔒 اعتماد هذا الكمبيوتر دائماً وبدء الشيفت
+                    {showPcSetup ? "إخفاء" : "⚙️ اعتماد هذا الكمبيوتر"}
                   </button>
-                </form>
-              )}
-            </div>
-
-            {/* Option 3: Office Wi-Fi / IP Info & Re-check */}
-            <div className="rounded-xl border border-zinc-200 bg-white p-3.5 dark:border-zinc-800 dark:bg-zinc-900 flex flex-wrap items-center justify-between gap-2 text-xs">
-              <div className="space-y-0.5">
-                <div className="font-bold text-zinc-800 dark:text-zinc-200">
-                  🌐 التحقق عبر شبكة Wi-Fi / إنترنت الشركة أو الـ GPS
                 </div>
-                {detectedIp && (
-                  <div className="text-[11px] text-zinc-500">
-                    عنوان الشبكة الحالي (IP):{" "}
-                    <code className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono font-bold text-zinc-900 dark:bg-zinc-800 dark:text-zinc-200" dir="ltr">
-                      {detectedIp}
-                    </code>
-                  </div>
+
+                {showPcSetup && (
+                  <form onSubmit={handleAuthorizeOfficePc} className="pt-2 border-t border-zinc-200 dark:border-zinc-700 space-y-2.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <input
+                        type="text"
+                        value={pcLabel}
+                        onChange={(e) => setPcLabel(e.target.value)}
+                        placeholder="اسم الجهاز (مثال: كمبيوتر التصميم 1)"
+                        className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-white"
+                      />
+                      <input
+                        type="password"
+                        dir="ltr"
+                        value={pcSetupCode}
+                        onChange={(e) => setPcSetupCode(e.target.value)}
+                        placeholder="كود اعتماد أجهزة المكتب (من الأدمن)"
+                        className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-mono text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-white"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      className="w-full rounded-lg bg-zinc-900 py-2 text-xs font-extrabold text-white hover:bg-zinc-800 dark:bg-white dark:text-zinc-900 cursor-pointer"
+                    >
+                      🔒 اعتماد هذا الكمبيوتر دائماً وبدء الشيفت
+                    </button>
+                  </form>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={onRetryGpsAndStartShift}
-                disabled={busy}
-                className="rounded-lg bg-sky-600 px-3.5 py-2 text-[11px] font-extrabold text-white hover:bg-sky-500 disabled:opacity-50 cursor-pointer"
-              >
-                {busy ? "⏳ جاري الفحص..." : "🔄 فحص شبكة الشركة / الموقع الآن"}
-              </button>
-            </div>
+            )}
           </div>
         )}
 
@@ -415,10 +461,10 @@ export default function OutsideLocationMissionModal({
                 <div className="font-extrabold text-sm">
                   ✅ تمت موافقة الأدمن على طلب المأمورية اليوم ({String(approvedMission.missionHours || 4)} ساعة)!
                 </div>
-                <p>يمكنك الآن بدء الشيفت مباشرة من موقعك الحالي.</p>
+                <p>يمكنك الآن بدء الشيفت مباشرة.</p>
                 <button
                   type="button"
-                  onClick={onRetryGpsAndStartShift}
+                  onClick={() => onRetryGpsAndStartShift()}
                   className="w-full rounded-xl bg-emerald-600 py-2.5 text-xs font-extrabold text-white shadow-md hover:bg-emerald-500 cursor-pointer"
                 >
                   ▶️ ابدأ الشيفت الآن
