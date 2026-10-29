@@ -185,14 +185,14 @@ export default function OutsideLocationMissionModal({
       return;
     }
 
-    // Also allow if the worker typed a registered Office IP or if their live IP matches the office network
-    const matchedByTypedOrLiveIp = matchOfficeNetworkIp(
-      [trimmedInput, ...detectedIps],
+    // Also allow if the worker's live detected IP now matches a newly synced office network
+    const matchedByLiveIp = matchOfficeNetworkIp(
+      detectedIps,
       effectiveSettings,
     );
-    if (matchedByTypedOrLiveIp && !freshConn.isCellular) {
+    if (matchedByLiveIp && !freshConn.isCellular) {
       setOfficePin("");
-      toast.success(`🌐 تم التأكد من شبكة الشركة (${matchedByTypedOrLiveIp.name}) ✓ — جاري بدء الشيفت...`);
+      toast.success(`🌐 تم التأكد من شبكة الشركة (${matchedByLiveIp.name}) ✓ — جاري بدء الشيفت...`);
       onRetryRef.current({ wifiJustVerified: true });
       return;
     }

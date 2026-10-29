@@ -283,8 +283,9 @@ export function authorizeTrustedOfficePc(
 }
 
 /**
- * Normalizes an IP string or pattern by converting Arabic/Persian digits,
- * stripping invisible directional characters, whitespace, protocol prefixes, and ::ffff:.
+ * Normalizes an IP string or wildcard pattern (e.g. "197.36.*.*", "197.36.*", "197.36.", "197.36.0.0/16")
+ * by converting Arabic/Persian digits, stripping invisible directional characters, whitespace,
+ * protocol prefixes, and ::ffff:.
  */
 export function normalizeIpString(raw: string | null | undefined): string {
   if (!raw) return "";
@@ -294,14 +295,37 @@ export function normalizeIpString(raw: string | null | undefined): string {
     .replace(/^::ffff:/i, "")
     .trim()
     .toLowerCase();
-  const ipv4Match = s.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.(?:\d{1,3}|\*))(?:\s*\/\s*(\d{1,2}))?/);
-  if (ipv4Match && ipv4Match[1]) {
-    if (ipv4Match[2] === "24") {
-      const octets = ipv4Match[1].split(".");
-      return `${octets[0]}.${octets[1]}.${octets[2]}.*`;
+
+  // Match IPv4 full, wildcard (e.g. 197.36.*.*, 197.36.*, 197.36.x.x, 197.36.), or CIDR (/8, /16, /24)
+  // First octet must always be numeric (\d{1,3}) so "*.*.*.*" can never be created accidentally.
+  const ipv4Candidate = s.match(
+    /(?:^|[^\da-f:.])(\d{1,3}(?:\.(?:\d{1,3}|\*|x)){1,3}\.?)(?:\s*\/\s*(\d{1,2}))?(?:$|[^\da-f:.])/i,
+  );
+  if (ipv4Candidate && ipv4Candidate[1]) {
+    const rawAddr = ipv4Candidate[1].replace(/x/gi, "*");
+    const cidr = ipv4Candidate[2] ? parseInt(ipv4Candidate[2], 10) : null;
+    const rawParts = rawAddr.split(".");
+    const parts = rawParts.map((p) => (p === "" ? "*" : p)).slice(0, 4);
+
+    if (cidr === 8 && parts.length >= 1) {
+      return `${parts[0]}.*.*.*`;
     }
-    return ipv4Match[1];
+    if (cidr === 16 && parts.length >= 2) {
+      return `${parts[0]}.${parts[1]}.*.*`;
+    }
+    if (cidr === 24 && parts.length >= 3) {
+      return `${parts[0]}.${parts[1]}.${parts[2]}.*`;
+    }
+
+    if (parts.length < 4 && (rawAddr.endsWith("*") || rawAddr.endsWith("."))) {
+      while (parts.length < 4) parts.push("*");
+    }
+
+    if (parts.length === 4) {
+      return parts.join(".");
+    }
   }
+
   return s.replace(/\/.*$/, "").replace(/[^\da-f:.*]/g, "");
 }
 
@@ -311,7 +335,7 @@ function extractIpTokens(raw: string | null | undefined): string[] {
     .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, "")
     .toLowerCase();
   const tokens = new Set<string>();
-  const parts = normalized.split(/[,،;|/\s]+/);
+  const parts = normalized.split(/[,،;|\s]+/);
   for (const part of parts) {
     const clean = normalizeIpString(part);
     if (clean && (clean.includes(".") || clean.includes(":"))) {
@@ -396,8 +420,27 @@ function getIpv4Subnet24Prefix(ip: string): string | null {
   return m && m[1] ? `${m[1]}.` : null;
 }
 
+function doesIpv4MatchWildcard(clientIp: string, pattern: string): boolean {
+  if (!clientIp.includes(".") || !pattern.includes(".")) return false;
+  const ipOctets = clientIp.split(".");
+  if (ipOctets.length !== 4 || !ipOctets.every((o) => /^\d{1,3}$/.test(o))) return false;
+
+  const patOctets = pattern.split(".").map((o) => (o === "" ? "*" : o));
+  if (patOctets.length < 4 && patOctets[patOctets.length - 1] === "*") {
+    while (patOctets.length < 4) patOctets.push("*");
+  }
+  if (patOctets.length !== 4 || !/^\d{1,3}$/.test(patOctets[0])) return false;
+
+  for (let i = 0; i < 4; i++) {
+    if (patOctets[i] === "*") continue;
+    if (patOctets[i] !== ipOctets[i]) return false;
+  }
+  return true;
+}
+
 /**
- * Checks if a client IP (or list of client IPs) matches any active configured Office Network IP / prefix.
+ * Checks if a client IP (or list of client IPs) matches any active configured Office Network IP / wildcard prefix.
+ * Supports full IPv4/IPv6, multi-octet wildcards like `197.36.*.*` or `197.36.104.*`, and CIDR `/16` & `/24`.
  */
 export function matchOfficeNetworkIp(
   clientIpOrList: string | string[] | null | undefined,
@@ -412,25 +455,36 @@ export function matchOfficeNetworkIp(
   );
 
   const isCellular = detectConnectionInfo().isCellular;
+  if (isCellular) return null;
 
   for (const net of activeNets) {
     const rawPatterns = extractIpTokens(net.ip);
 
     for (const pat of rawPatterns) {
       for (const ip of candidateIps) {
-        if (pat === ip) return net;
-        if (pat.endsWith("*")) {
-          const prefix = pat.replace(/\*+$/, "");
-          if (prefix && ip.startsWith(prefix)) return net;
+        // 1. Exact full IP match
+        if (!pat.includes("*") && pat === ip) return net;
+
+        // 2. IPv4 wildcard match (e.g. 197.36.*.*, 197.36.104.*, 197.*.*.*) — only on non-cellular connections
+        if (!isCellular && pat.includes("*") && pat.includes(".") && ip.includes(".")) {
+          if (doesIpv4MatchWildcard(ip, pat)) return net;
         }
-        // If both are IPv6 addresses on the same router (/64 prefix), match the router prefix
-        if (pat.includes(":") && ip.includes(":")) {
+
+        // 3. IPv6 wildcard prefix match (e.g. 2c0f:f888:*) — only on non-cellular connections
+        if (!isCellular && pat.includes("*") && pat.includes(":") && ip.includes(":")) {
+          const pfx = pat.slice(0, pat.indexOf("*"));
+          if (pfx && ip.startsWith(pfx)) return net;
+        }
+
+        // 4. If both are IPv6 addresses on the same router (/64 prefix), match the router prefix
+        if (!isCellular && pat.includes(":") && ip.includes(":")) {
           const patPfx = getIpv6NetworkPrefix64(pat);
           const ipPfx = getIpv6NetworkPrefix64(ip);
           if (patPfx && ipPfx && patPfx === ipPfx) return net;
         }
-        // If both are IPv4 on the same ISP /24 router pool and device is on Wi-Fi/Ethernet (not cellular)
-        if (!isCellular && pat.includes(".") && ip.includes(".")) {
+
+        // 5. If both are IPv4 on the same ISP /24 router pool and device is on Wi-Fi/Ethernet (not cellular)
+        if (!isCellular && !pat.includes("*") && pat.includes(".") && ip.includes(".")) {
           const patSub = getIpv4Subnet24Prefix(pat);
           const ipSub = getIpv4Subnet24Prefix(ip);
           if (patSub && ipSub && patSub === ipSub) return net;
