@@ -132,6 +132,7 @@ type WorkerDoc = {
   netspend?: string;
   createdAt?: Timestamp;
   lastLogin?: Timestamp;
+  isOnline?: boolean;
   /** HR-POL-2026 leave profile (set by admin). */
   hireDate?: string;
   attendanceStartDate?: string;
@@ -551,6 +552,12 @@ export default function DashboardApp() {
           } catch {
             /* ignore */
           }
+        }
+        if (data.isOnline) {
+          updateDoc(doc(fb.db, "workers", userId), {
+            isOnline: false,
+            presenceStatus: "offline",
+          }).catch(() => {});
         }
         // Open task selection & shift start modal immediately upon entering the system
         setShiftMode(storedMode === "view-only" ? "view-only" : null);

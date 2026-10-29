@@ -141,8 +141,8 @@ export default function LoginForm() {
       await Promise.race([
         updateDoc(wref, {
           lastLogin: serverTimestamp(),
-          currentLoginTime: serverTimestamp(),
-          isOnline: true,
+          isOnline: false,
+          presenceStatus: "offline",
         }).catch(() => {}),
         new Promise<void>((resolve) => setTimeout(() => resolve(), 2500)),
       ]);

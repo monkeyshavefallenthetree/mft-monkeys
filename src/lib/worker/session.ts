@@ -123,6 +123,8 @@ export async function initWorkSession(
 
     if (worker.uid) {
       updateDoc(doc(db, "workers", worker.uid), {
+        isOnline: true,
+        currentLoginTime: serverTimestamp(),
         presenceStatus: "active",
         lastActiveAt: serverTimestamp(),
         lastActiveCheckAt: serverTimestamp(),
@@ -182,6 +184,8 @@ export async function initWorkSession(
 
       if (worker.uid) {
         const workerPayload: Record<string, unknown> = {
+          isOnline: true,
+          currentLoginTime: serverTimestamp(),
           presenceStatus: "active",
           lastActiveAt: serverTimestamp(),
           lastActiveCheckAt: serverTimestamp(),
@@ -242,6 +246,13 @@ export async function endWorkSession(db: Firestore, session: WorkSessionState): 
     }),
     new Promise<void>((resolve) => setTimeout(() => resolve(), 6000)),
   ]);
+  if (session.workerId) {
+    updateDoc(doc(db, "workers", session.workerId), {
+      isOnline: false,
+      presenceStatus: "offline",
+      lastLogout: serverTimestamp(),
+    }).catch(() => {});
+  }
   return { ...session, priorMs: totalWorkTime, segmentStart: logoutTime, isActive: false };
 }
 
